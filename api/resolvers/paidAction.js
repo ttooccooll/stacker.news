@@ -8,6 +8,7 @@ function paidActionType (actionType) {
       return 'ItemPaidAction'
     case 'ZAP':
     case 'DOWN_ZAP':
+    case 'BOOST':
       return 'ItemActPaidAction'
     case 'TERRITORY_CREATE':
     case 'TERRITORY_UPDATE':
@@ -26,7 +27,12 @@ function paidActionType (actionType) {
 export default {
   Query: {
     paidAction: async (parent, { invoiceId }, { models, me }) => {
-      const invoice = await models.invoice.findUnique({ where: { id: invoiceId, userId: me?.id ?? USER_ID.anon } })
+      const invoice = await models.invoice.findUnique({
+        where: {
+          id: invoiceId,
+          userId: me?.id ?? USER_ID.anon
+        }
+      })
       if (!invoice) {
         throw new Error('Invoice not found')
       }
@@ -35,7 +41,7 @@ export default {
         type: paidActionType(invoice.actionType),
         invoice,
         result: invoice.actionResult,
-        paymentMethod: invoice.preimage ? 'PESSIMISTIC' : 'OPTIMISTIC'
+        paymentMethod: invoice.actionOptimistic ? 'OPTIMISTIC' : 'PESSIMISTIC'
       }
     }
   },
@@ -50,7 +56,14 @@ export default {
         throw new Error('Invoice not found')
       }
 
-      const result = await retryPaidAction(invoice.actionType, { invoiceId }, { models, me, lnd })
+      if (invoice.actionState !== 'FAILED') {
+        if (invoice.actionState === 'PAID') {
+          throw new Error('Invoice is already paid')
+        }
+        throw new Error(`Invoice is not in failed state: ${invoice.actionState}`)
+      }
+
+      const result = await retryPaidAction(invoice.actionType, { invoice }, { models, me, lnd })
 
       return {
         ...result,

@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { LoginButtons, LogoutDropdownItem, NavWalletSummary } from '../common'
 import AnonIcon from '@/svgs/spy-fill.svg'
 import styles from './footer.module.css'
+import canvasStyles from './offcanvas.module.css'
 import classNames from 'classnames'
 
 export default function OffCanvas ({ me, dropNavKey }) {
@@ -28,7 +29,7 @@ export default function OffCanvas ({ me, dropNavKey }) {
     <>
       <MeImage onClick={handleShow} />
 
-      <Offcanvas style={{ maxWidth: '250px', zIndex: '10000' }} show={show} onHide={handleClose} placement='end'>
+      <Offcanvas className={canvasStyles.offcanvas} show={show} onHide={handleClose} placement='end'>
         <Offcanvas.Header closeButton>
           <Offcanvas.Title><NavWalletSummary /></Offcanvas.Title>
         </Offcanvas.Header>
@@ -75,10 +76,10 @@ export default function OffCanvas ({ me, dropNavKey }) {
                     </Link>
                   </div>
                   <Dropdown.Divider />
-                  <LogoutDropdownItem />
+                  <LogoutDropdownItem handleClose={handleClose} />
                 </>
                 )
-              : <LoginButtons />}
+              : <LoginButtons handleClose={handleClose} />}
             <div className={classNames(styles.footerPadding, 'mt-auto')}>
               <Navbar className={classNames('container d-flex flex-row px-0 text-muted')}>
                 <Nav>

@@ -5,16 +5,22 @@
     -webkit-touch-callout: none;
 }
 
+.boost {
+    fill: var(--theme-clickToContextColor);
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
 .upvoteWrapper {
     position: relative;
-    margin-right: .2rem;
+    padding-right: .2rem;
     padding-left: .2rem;
     margin-left: -.4rem;
 }
 
 .noSelfTips {
-    fill: transparent !important;
-    filter: none !important;
+    transform: scaleX(-1);
 }
 
 .upvoteWrapper:not(.noSelfTips):hover {

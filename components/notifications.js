@@ -14,6 +14,8 @@ import UserAdd from '@/svgs/user-add-fill.svg'
 import { LOST_BLURBS, FOUND_BLURBS, UNKNOWN_LINK_REL } from '@/lib/constants'
 import CowboyHatIcon from '@/svgs/cowboy.svg'
 import BaldIcon from '@/svgs/bald.svg'
+import GunIcon from '@/svgs/revolver.svg'
+import HorseIcon from '@/svgs/horse.svg'
 import { RootProvider } from './root'
 import Alert from 'react-bootstrap/Alert'
 import styles from './notifications.module.css'
@@ -38,6 +40,9 @@ import { paidActionCacheMods } from './use-paid-mutation'
 import { useRetryCreateItem } from './use-item-submit'
 import { payBountyCacheMods } from './pay-bounty'
 import { useToast } from './toast'
+import classNames from 'classnames'
+import HolsterIcon from '@/svgs/holster.svg'
+import SaddleIcon from '@/svgs/saddle.svg'
 
 function Notification ({ n, fresh }) {
   const type = n.__typename
@@ -96,20 +101,20 @@ function NotificationLayout ({ children, type, nid, href, as, fresh }) {
 
 function NoteHeader ({ color, children, big }) {
   return (
-    <div className={`fw-bold text-${color} ${big ? '' : 'small'} d-inline-flex align-items-center pb-2`} style={{ lineHeight: '1.25' }}>
+    <div className={`${styles.noteHeader} text-${color} ${big ? '' : 'small'} pb-2`}>
       {children}
     </div>
   )
 }
 
-function NoteItem ({ item }) {
+function NoteItem ({ item, ...props }) {
   return (
     <div>
       {item.title
-        ? <Item item={item} itemClassName='pt-0' />
+        ? <Item item={item} itemClassName='pt-0' {...props} />
         : (
           <RootProvider root={item.root}>
-            <Comment item={item} noReply includeParent clickToContext />
+            <Comment item={item} noReply includeParent clickToContext {...props} />
           </RootProvider>)}
     </div>
   )
@@ -167,23 +172,28 @@ const defaultOnClick = n => {
 
 function Streak ({ n }) {
   function blurb (n) {
-    const index = Number(n.id) % Math.min(FOUND_BLURBS.length, LOST_BLURBS.length)
+    const type = n.type ?? 'COWBOY_HAT'
+    const index = Number(n.id) % Math.min(FOUND_BLURBS[type].length, LOST_BLURBS[type].length)
     if (n.days) {
       return `After ${numWithUnits(n.days, {
         abbreviate: false,
         unitSingular: 'day',
          unitPlural: 'days'
-      })}, ` + LOST_BLURBS[index]
+      })}, ` + LOST_BLURBS[type][index]
     }
 
-    return FOUND_BLURBS[index]
+    return FOUND_BLURBS[type][index]
   }
+
+  const Icon = n.days
+    ? n.type === 'GUN' ? HolsterIcon : n.type === 'HORSE' ? SaddleIcon : BaldIcon
+    : n.type === 'GUN' ? GunIcon : n.type === 'HORSE' ? HorseIcon : CowboyHatIcon
 
   return (
     <div className='d-flex'>
-      <div style={{ fontSize: '2rem' }}>{n.days ? <BaldIcon className='fill-grey' height={40} width={40} /> : <CowboyHatIcon className='fill-grey' height={40} width={40} />}</div>
+      <div style={{ fontSize: '2rem' }}><Icon className='fill-grey' height={40} width={40} /></div>
       <div className='ms-1 p-1'>
-        <span className='fw-bold'>you {n.days ? 'lost your' : 'found a'} cowboy hat</span>
+        <span className='fw-bold'>you {n.days ? 'lost your' : 'found a'} {n.type.toLowerCase().replace('_', ' ')}</span>
         <div><small style={{ lineHeight: '140%', display: 'inline-block' }}>{blurb(n)}</small></div>
       </div>
     </div>
@@ -227,7 +237,7 @@ function ReferralReward ({ n }) {
         {n.sources &&
           <div style={{ fontSize: '80%', color: 'var(--theme-grey)' }}>
             {n.sources.forever > 0 && <span>{numWithUnits(n.sources.forever, { abbreviate: false })} for stackers joining because of you</span>}
-            {n.sources.oneDay > 0 && <span>{n.sources.oneDay > 0 && ' \\ '}{numWithUnits(n.sources.oneDay, { abbreviate: false })} for stackers referred to content by you today</span>}
+            {n.sources.oneDay > 0 && <span>{n.sources.forever > 0 && ' \\ '}{numWithUnits(n.sources.oneDay, { abbreviate: false })} for stackers referred to content by you today</span>}
           </div>}
         <div style={{ lineHeight: '140%' }}>
           SN gives referral rewards to stackers like you for referring the top stackers daily. You refer stackers when they visit your posts, comments, profile, territory, or if they visit SN through your referral links.
@@ -242,12 +252,12 @@ function RevenueNotification ({ n }) {
   return (
     <div className='d-flex'>
       <BountyIcon className='align-self-center fill-success mx-1' width={24} height={24} style={{ flex: '0 0 24px' }} />
-      <div className=' pb-1'>
-        <div className='fw-bold text-success'>
+      <div className='ms-2'>
+        <NoteHeader color='success' big>
           you stacked {numWithUnits(n.earnedSats, { abbreviate: false })} in territory revenue<small className='text-muted ms-1 fw-normal' suppressHydrationWarning>{timeSince(new Date(n.sortTime))}</small>
-        </div>
+        </NoteHeader>
         <div style={{ lineHeight: '140%' }}>
-          As the founder of territory <Link href={`/~${n.subName}`}>~{n.subName}</Link>, you receive 50% of the revenue it generates and the other 50% go to <Link href='/rewards'>rewards</Link>.
+          As the founder of territory <Link href={`/~${n.subName}`}>~{n.subName}</Link>, you receive 70% of the post, comment, boost, and zap fees. The other 30% go to <Link href='/rewards'>rewards</Link>.
         </div>
       </div>
     </div>
@@ -343,7 +353,10 @@ function InvoicePaid ({ n }) {
 }
 
 function useActRetry ({ invoice }) {
-  const bountyCacheMods = invoice.item?.bounty ? payBountyCacheMods() : {}
+  const bountyCacheMods =
+    invoice.item.root?.bounty === invoice.satsRequested && invoice.item.root?.mine
+      ? payBountyCacheMods
+      : {}
   return useAct({
     query: RETRY_PAID_ACTION,
     onPayError: (e, cache, { data }) => {
@@ -383,6 +396,7 @@ function Invoicification ({ n: { invoice, sortTime } }) {
   const actRetry = useActRetry({ invoice })
   const retryCreateItem = useRetryCreateItem({ id: invoice.item?.id })
   const retryPollVote = usePollVote({ query: RETRY_PAID_ACTION, itemId: invoice.item?.id })
+  const [disableRetry, setDisableRetry] = useState(false)
   // XXX if we navigate to an invoice after it is retried in notifications
   // the cache will clear invoice.item and will error on window.back
   // alternatively, we could/should
@@ -406,9 +420,18 @@ function Invoicification ({ n: { invoice, sortTime } }) {
     invoiceId = invoice.item.poll?.meInvoiceId
     invoiceActionState = invoice.item.poll?.meInvoiceActionState
   } else {
-    actionString = `${invoice.actionType === 'ZAP'
-      ? invoice.item.root?.bounty ? 'bounty payment' : 'zap'
-      : 'downzap'} on ${itemType} `
+    if (invoice.actionType === 'ZAP') {
+      if (invoice.item.root?.bounty === invoice.satsRequested && invoice.item.root?.mine) {
+        actionString = 'bounty payment'
+      } else {
+        actionString = 'zap'
+      }
+    } else if (invoice.actionType === 'DOWN_ZAP') {
+      actionString = 'downzap'
+    } else if (invoice.actionType === 'BOOST') {
+      actionString = 'boost'
+    }
+    actionString = `${actionString} on ${itemType} `
     retry = actRetry;
     ({ id: invoiceId, actionState: invoiceActionState } = invoice.itemAct.invoice)
   }
@@ -434,14 +457,19 @@ function Invoicification ({ n: { invoice, sortTime } }) {
         <span className='ms-1 text-muted fw-light'> {numWithUnits(invoice.satsRequested)}</span>
         <span className={invoiceActionState === 'FAILED' ? 'visible' : 'invisible'}>
           <Button
-            size='sm' variant='outline-warning ms-2 border-1 rounded py-0'
+            size='sm' variant={classNames('outline-warning ms-2 border-1 rounded py-0', disableRetry && 'pulse')}
             style={{ '--bs-btn-hover-color': '#fff', '--bs-btn-active-color': '#fff' }}
+            disabled={disableRetry}
             onClick={async () => {
+              if (disableRetry) return
+              setDisableRetry(true)
               try {
                 const { error } = await retry({ variables: { invoiceId: parseInt(invoiceId) } })
                 if (error) throw error
               } catch (error) {
                 toaster.danger(error?.message || error?.toString?.())
+              } finally {
+                setDisableRetry(false)
               }
             }}
           >
@@ -450,7 +478,7 @@ function Invoicification ({ n: { invoice, sortTime } }) {
           <span className='text-muted ms-2 fw-normal' suppressHydrationWarning>{timeSince(new Date(sortTime))}</span>
         </span>
       </NoteHeader>
-      <NoteItem item={invoice.item} />
+      <NoteItem item={invoice.item} setDisableRetry={setDisableRetry} disableRetry={disableRetry} />
     </div>
   )
 }
@@ -458,9 +486,11 @@ function Invoicification ({ n: { invoice, sortTime } }) {
 function WithdrawlPaid ({ n }) {
   return (
     <div className='fw-bold text-info'>
-      <Check className='fill-info me-1' />{numWithUnits(n.earnedSats, { abbreviate: false, unitSingular: 'sat was', unitPlural: 'sats were' })} withdrawn from your account
+      <Check className='fill-info me-1' />{numWithUnits(n.earnedSats + n.withdrawl.satsFeePaid, { abbreviate: false, unitSingular: 'sat was ', unitPlural: 'sats were ' })}
+      {n.withdrawl.p2p || n.withdrawl.autoWithdraw ? 'sent to your attached wallet' : 'withdrawn from your account'}
       <small className='text-muted ms-1 fw-normal' suppressHydrationWarning>{timeSince(new Date(n.sortTime))}</small>
-      {n.withdrawl.autoWithdraw && <Badge className={styles.badge} bg={null}>autowithdraw</Badge>}
+      {(n.withdrawl.p2p && <Badge className={styles.badge} bg={null}>p2p</Badge>) ||
+      (n.withdrawl.autoWithdraw && <Badge className={styles.badge} bg={null}>autowithdraw</Badge>)}
     </div>
   )
 }

@@ -7,9 +7,10 @@ import { WELCOME_BANNER_MUTATION } from '@/fragments/users'
 import { useToast } from '@/components/toast'
 import { BALANCE_LIMIT_MSATS } from '@/lib/constants'
 import { msatsToSats, numWithUnits } from '@/lib/format'
+import Link from 'next/link'
 
 export function WelcomeBanner ({ Banner }) {
-  const me = useMe()
+  const { me } = useMe()
   const toaster = useToast()
   const [hidden, setHidden] = useState(true)
   const handleClose = async () => {
@@ -70,7 +71,7 @@ export function WelcomeBanner ({ Banner }) {
 }
 
 export function MadnessBanner ({ handleClose }) {
-  const me = useMe()
+  const { me } = useMe()
   return (
     <Alert className={styles.banner} key='info' variant='info' onClose={handleClose} dismissible>
       <Alert.Heading>
@@ -102,7 +103,7 @@ export function MadnessBanner ({ handleClose }) {
 }
 
 export function WalletLimitBanner () {
-  const me = useMe()
+  const { me } = useMe()
 
   const limitReached = me?.privates?.sats >= msatsToSats(BALANCE_LIMIT_MSATS)
   if (!me || !limitReached) return
@@ -122,18 +123,17 @@ export function WalletLimitBanner () {
   )
 }
 
-export function WalletSecurityBanner () {
+export function WalletSecurityBanner ({ isActive }) {
   return (
     <Alert className={styles.banner} key='info' variant='warning'>
       <Alert.Heading>
-        Wallet Security Disclaimer
+        Gunslingin' Safety Tips
       </Alert.Heading>
-      <p className='mb-1'>
-        Your wallet's credentials are stored in the browser and never go to the server.<br />
-        However, you should definitely <strong>set a budget in your wallet</strong>.
+      <p className='mb-3 line-height-md'>
+        Listen up, pardner! Put a limit on yer spendin' wallet or hook up a wallet that's only for Stacker News. It'll keep them varmints from cleanin' out yer whole goldmine if they rustle up yer wallet.
       </p>
-      <p>
-        Also, for the time being, you will have to reenter your credentials on other devices.
+      <p className='line-height-md'>
+        Your spending wallet's credentials are never sent to our servers in plain text. To sync across devices, <Alert.Link as={Link} href='/settings/passphrase'>enable device sync in your settings</Alert.Link>.
       </p>
     </Alert>
   )

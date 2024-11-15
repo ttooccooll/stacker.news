@@ -8,16 +8,16 @@ import Bolt11Info from './bolt11-info'
 import { useQuery } from '@apollo/client'
 import { INVOICE } from '@/fragments/wallet'
 import { FAST_POLL_INTERVAL, SSR } from '@/lib/constants'
-import { WebLnNotEnabledError } from './payment'
+import { NoAttachedWalletError } from '@/wallets/errors'
 import ItemJob from './item-job'
 import Item from './item'
 import { CommentFlat } from './comment'
 import classNames from 'classnames'
+import Moon from '@/svgs/moon-fill.svg'
 
 export default function Invoice ({
-  id, query = INVOICE, modal, onPayment, onCanceled,
-  info, successVerb, webLn = true, webLnError,
-  poll, waitFor, ...props
+  id, query = INVOICE, modal, onPayment, onCanceled, info, successVerb = 'deposited',
+  heldVerb = 'settling', useWallet = true, walletError, poll, waitFor, ...props
 }) {
   const [expired, setExpired] = useState(false)
   const { data, error } = useQuery(query, SSR
@@ -55,19 +55,27 @@ export default function Invoice ({
   let variant = 'default'
   let status = 'waiting for you'
 
-  if (invoice.cancelled) {
+  if (invoice.confirmedAt) {
+    variant = 'confirmed'
+    status = `${numWithUnits(invoice.satsReceived, { abbreviate: false })} ${successVerb}`
+    useWallet = false
+  } else if (invoice.cancelled) {
     variant = 'failed'
     status = 'cancelled'
-    webLn = false
-  } else if (invoice.confirmedAt || (invoice.isHeld && invoice.satsReceived && !expired)) {
-    variant = 'confirmed'
-    status = `${numWithUnits(invoice.satsReceived, { abbreviate: false })} ${successVerb || 'deposited'}`
-    webLn = false
+    useWallet = false
+  } else if (invoice.isHeld) {
+    variant = 'pending'
+    status = (
+      <div className='d-flex justify-content-center'>
+        <Moon className='spin fill-grey me-2' /> {heldVerb}
+      </div>
+    )
+    useWallet = false
   } else if (expired) {
     variant = 'failed'
     status = 'expired'
-    webLn = false
-  } else if (invoice.expiresAt) {
+    useWallet = false
+  } else {
     variant = 'pending'
     status = (
       <CompactLongCountdown
@@ -82,13 +90,13 @@ export default function Invoice ({
 
   return (
     <>
-      {webLnError && !(webLnError instanceof WebLnNotEnabledError) &&
+      {walletError && !(walletError instanceof NoAttachedWalletError) &&
         <div className='text-center fw-bold text-info mb-3' style={{ lineHeight: 1.25 }}>
           Paying from attached wallet failed:
-          <code> {webLnError.message}</code>
+          <code> {walletError.message}</code>
         </div>}
       <Qr
-        webLn={webLn} value={invoice.bolt11}
+        useWallet={useWallet} value={invoice.bolt11}
         description={numWithUnits(invoice.satsRequested, { abbreviate: false })}
         statusVariant={variant} status={status}
       />
@@ -113,7 +121,8 @@ export default function Invoice ({
             <div className='w-100'>
               <AccordianItem
                 header='sender information'
-                body={<PayerData data={lud18Data} className='text-muted ms-3 mb-3' />}
+                body={<PayerData data={lud18Data} className='text-muted ms-3' />}
+                className='mb-3'
               />
             </div>}
           {comment &&
@@ -121,6 +130,7 @@ export default function Invoice ({
               <AccordianItem
                 header='sender comments'
                 body={<span className='text-muted ms-3'>{comment}</span>}
+                className='mb-3'
               />
             </div>}
           <Bolt11Info bolt11={bolt11} preimage={confirmedPreimage} />

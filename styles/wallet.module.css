@@ -7,9 +7,28 @@
   margin-top: 3rem;
 }
 
+.drag {
+  opacity: 33%;
+}
+
+.drop {
+  box-shadow: 0 0 10px var(--bs-info);
+}
+
 .card {
   width: 160px;
   height: 180px;
+}
+
+.cardMeta {
+  position: absolute;
+  width: 100%;
+  display: grid;
+  align-items: center;
+  justify-content: end;
+  padding: 10px 10px 0 10px;
+  grid-gap: 0.2rem;
+  grid-auto-flow: column;
 }
 
 .badge {
@@ -19,6 +38,14 @@
   margin-bottom: 0.1rem;
   margin-top: 0.1rem;
   margin-right: 0.2rem;
+}
+
+.receive {
+  color: #20c997 !important;
+}
+
+.send {
+  color: var(--bs-primary) !important;
 }
 
 .attach {
@@ -34,11 +61,7 @@
 .indicator {
   width: 10px;
   height: 10px;
-  right: 10px;
-  top: 10px;
   border-radius: 50%;
-  display: inline-block;
-  position: absolute;
 }
 
 .indicator.success {

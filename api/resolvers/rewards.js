@@ -1,8 +1,8 @@
-import { GraphQLError } from 'graphql'
-import { amountSchema, ssValidate } from '@/lib/validate'
-import { getItem } from './item'
+import { amountSchema, validateSchema } from '@/lib/validate'
+import { getAd, getItem } from './item'
 import { topUsers } from './user'
 import performPaidAction from '../paidAction'
+import { GqlInputError } from '@/lib/error'
 
 let rewardCache
 
@@ -63,21 +63,21 @@ async function getMonthlyRewards (when, models) {
 async function getRewards (when, models) {
   if (when) {
     if (when.length > 1) {
-      throw new GraphQLError('too many dates', { extensions: { code: 'BAD_USER_INPUT' } })
+      throw new GqlInputError('too many dates')
     }
     when.forEach(w => {
       if (isNaN(new Date(w))) {
-        throw new GraphQLError('invalid date', { extensions: { code: 'BAD_USER_INPUT' } })
+        throw new GqlInputError('invalid date')
       }
     })
     if (new Date(when[0]) > new Date(when[when.length - 1])) {
-      throw new GraphQLError('bad date range', { extensions: { code: 'BAD_USER_INPUT' } })
+      throw new GqlInputError('bad date range')
     }
 
     if (new Date(when[0]).getTime() > new Date('2024-03-01').getTime() && new Date(when[0]).getTime() < new Date('2024-05-02').getTime()) {
       // after 3/1/2024 and until 5/1/2024, we reward monthly on the 1st
       if (new Date(when[0]).getUTCDate() !== 1) {
-        throw new GraphQLError('invalid reward date', { extensions: { code: 'BAD_USER_INPUT' } })
+        throw new GqlInputError('bad reward date')
       }
 
       return await getMonthlyRewards(when, models)
@@ -119,11 +119,11 @@ export default {
       }
 
       if (!when || when.length > 2) {
-        throw new GraphQLError('invalid date range', { extensions: { code: 'BAD_USER_INPUT' } })
+        throw new GqlInputError('bad date range')
       }
       for (const w of when) {
         if (isNaN(new Date(w))) {
-          throw new GraphQLError('invalid date', { extensions: { code: 'BAD_USER_INPUT' } })
+          throw new GqlInputError('invalid date')
         }
       }
 
@@ -141,6 +141,7 @@ export default {
           (SELECT FLOOR("Earn".msats / 1000.0) as sats, type, rank, "typeId"
             FROM "Earn"
             WHERE "Earn"."userId" = ${me.id}
+            AND (type IS NULL OR type NOT IN ('FOREVER_REFERRAL', 'ONE_DAY_REFERRAL'))
             AND date_trunc('day', "Earn".created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Chicago') = days_cte.day
             ORDER BY "Earn".msats DESC)
         ) "Earn"
@@ -163,11 +164,14 @@ export default {
         return 0
       }
       return parent.total
+    },
+    ad: async (parent, args, { me, models }) => {
+      return await getAd(parent, { }, { me, models })
     }
   },
   Mutation: {
     donateToRewards: async (parent, { sats }, { me, models, lnd }) => {
-      await ssValidate(amountSchema, { amount: sats })
+      await validateSchema(amountSchema, { amount: sats })
 
       return await performPaidAction('DONATE', { sats }, { me, models, lnd })
     }

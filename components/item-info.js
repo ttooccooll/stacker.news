@@ -6,7 +6,7 @@ import Dropdown from 'react-bootstrap/Dropdown'
 import Countdown from './countdown'
 import { abbrNum, numWithUnits } from '@/lib/format'
 import { newComments, commentsViewedAt } from '@/lib/new-comments'
-import { timeSince } from '@/lib/time'
+import { datePivot, timeSince } from '@/lib/time'
 import { DeleteDropdownItem } from './delete'
 import styles from './item.module.css'
 import { useMe } from './me'
@@ -14,7 +14,7 @@ import DontLikeThisDropdownItem, { OutlawDropdownItem } from './dont-link-this'
 import BookmarkDropdownItem from './bookmark'
 import SubscribeDropdownItem from './subscribe'
 import { CopyLinkDropdownItem, CrosspostDropdownItem } from './share'
-import Hat from './hat'
+import Badges from './badge'
 import { USER_ID } from '@/lib/constants'
 import ActionDropdown from './action-dropdown'
 import MuteDropdownItem from './mute'
@@ -25,22 +25,20 @@ import UserPopover from './user-popover'
 import { useQrPayment } from './payment'
 import { useRetryCreateItem } from './use-item-submit'
 import { useToast } from './toast'
+import { useShowModal } from './modal'
+import classNames from 'classnames'
 
 export default function ItemInfo ({
   item, full, commentsText = 'comments',
-  commentTextSingular = 'comment', className, embellishUser, extraInfo, onEdit, editText,
-  onQuoteReply, extraBadges, nested, pinnable, showActionDropdown = true, showUser = true
+  commentTextSingular = 'comment', className, embellishUser, extraInfo, edit, toggleEdit, editText,
+  onQuoteReply, extraBadges, nested, pinnable, showActionDropdown = true, showUser = true,
+  setDisableRetry, disableRetry
 }) {
-  const editThreshold = new Date(item.invoice?.confirmedAt ?? item.createdAt).getTime() + 10 * 60000
-  const me = useMe()
-  const toaster = useToast()
+  const editThreshold = datePivot(new Date(item.invoice?.confirmedAt ?? item.createdAt), { minutes: 10 })
+  const { me } = useMe()
   const router = useRouter()
-  const [canEdit, setCanEdit] =
-    useState(item.mine && (Date.now() < editThreshold))
   const [hasNewComments, setHasNewComments] = useState(false)
-  const [meTotalSats, setMeTotalSats] = useState(0)
   const root = useRoot()
-  const retryCreateItem = useRetryCreateItem({ id: item.id })
   const sub = item?.sub || root?.sub
 
   useEffect(() => {
@@ -49,13 +47,18 @@ export default function ItemInfo ({
     }
   }, [item])
 
+  // allow anon edits if they have the correct hmac for the item invoice
+  // (the server will verify the hmac)
+  const [anonEdit, setAnonEdit] = useState(false)
   useEffect(() => {
-    setCanEdit(item.mine && (Date.now() < editThreshold))
-  }, [item.mine, editThreshold])
+    const invParams = window.localStorage.getItem(`item:${item.id}:hash:hmac`)
+    setAnonEdit(!!invParams && !me && Number(item.user.id) === USER_ID.anon)
+  }, [])
 
-  useEffect(() => {
-    if (item) setMeTotalSats(item.meSats || item.meAnonSats || 0)
-  }, [item?.meSats, item?.meAnonSats])
+  // deleted items can never be edited and every item has a 10 minute edit window
+  // except bios, they can always be edited but they should never show the countdown
+  const noEdit = !!item.deletedAt || (Date.now() >= editThreshold) || item.bio
+  const canEdit = !noEdit && ((me && item.mine) || anonEdit)
 
   // territory founders can pin any post in their territory
   // and OPs can pin any root reply in their post
@@ -64,61 +67,7 @@ export default function ItemInfo ({
   const myPost = (me && root && Number(me.id) === Number(root.user.id))
   const rootReply = item.path.split('.').length === 2
   const canPin = (isPost && mySub) || (myPost && rootReply)
-
-  const EditInfo = () => {
-    const waitForQrPayment = useQrPayment()
-    if (item.deletedAt) return null
-
-    let Component
-    let onClick
-    if (me && item.invoice?.actionState && item.invoice?.actionState !== 'PAID') {
-      if (item.invoice?.actionState === 'FAILED') {
-        Component = () => <span className='text-warning'>retry payment</span>
-        onClick = async () => {
-          try {
-            const { error } = await retryCreateItem({ variables: { invoiceId: parseInt(item.invoice?.id) } })
-            if (error) throw error
-          } catch (error) {
-            toaster.danger(error.message)
-          }
-        }
-      } else {
-        Component = () => (
-          <span
-            className='text-info'
-          >pending
-          </span>
-        )
-        onClick = () => waitForQrPayment({ id: item.invoice?.id }, null, { cancelOnClose: false }).catch(console.error)
-      }
-    } else if (canEdit) {
-      Component = () => (
-        <>
-          <span>{editText || 'edit'} </span>
-          <Countdown
-            date={editThreshold}
-            onComplete={() => {
-              setCanEdit(false)
-            }}
-          />
-        </>)
-      onClick = () => onEdit ? onEdit() : router.push(`/items/${item.id}/edit`)
-    } else {
-      return null
-    }
-
-    return (
-      <>
-        <span> \ </span>
-        <span
-          className='text-reset pointer fw-bold'
-          onClick={onClick}
-        >
-          <Component />
-        </span>
-      </>
-    )
-  }
+  const meSats = (me ? item.meSats : item.meAnonSats) || 0
 
   return (
     <div className={className || `${styles.other}`}>
@@ -130,7 +79,7 @@ export default function ItemInfo ({
             unitPlural: 'stackers'
           })} ${item.mine
             ? `\\ ${numWithUnits(item.meSats, { abbreviate: false })} to post`
-            : `(${numWithUnits(meTotalSats, { abbreviate: false })}${item.meDontLikeSats
+            : `(${numWithUnits(meSats, { abbreviate: false })}${item.meDontLikeSats
               ? ` & ${numWithUnits(item.meDontLikeSats, { abbreviate: false, unitSingular: 'downsat', unitPlural: 'downsats' })}`
               : ''} from me)`} `}
           >
@@ -167,12 +116,11 @@ export default function ItemInfo ({
       <span> \ </span>
       <span>
         {showUser &&
-          <UserPopover name={item.user.name}>
-            <Link href={`/${item.user.name}`}>
-              @{item.user.name}<span> </span><Hat className='fill-grey' user={item.user} height={12} width={12} />
-              {embellishUser}
-            </Link>
-          </UserPopover>}
+          <Link href={`/${item.user.name}`}>
+            <UserPopover name={item.user.name}>@{item.user.name}</UserPopover>
+            <Badges badgeClassName='fill-grey' spacingClassName='ms-xs' height={12} width={12} user={item.user} />
+            {embellishUser}
+          </Link>}
         <span> </span>
         <Link href={`/items/${item.id}`} title={item.createdAt} className='text-reset' suppressHydrationWarning>
           {timeSince(new Date(item.createdAt))}
@@ -207,9 +155,14 @@ export default function ItemInfo ({
       {
         showActionDropdown &&
           <>
-            <EditInfo />
+            <EditInfo
+              item={item} edit={edit} canEdit={canEdit}
+              setCanEdit={setAnonEdit} toggleEdit={toggleEdit} editText={editText} editThreshold={editThreshold}
+            />
+            <PaymentInfo item={item} disableRetry={disableRetry} setDisableRetry={setDisableRetry} />
             <ActionDropdown>
               <CopyLinkDropdownItem item={item} />
+              <InfoDropdownItem item={item} />
               {(item.parentId || item.text) && onQuoteReply &&
                 <Dropdown.Item onClick={onQuoteReply}>quote reply</Dropdown.Item>}
               {me && <BookmarkDropdownItem item={item} />}
@@ -227,7 +180,7 @@ export default function ItemInfo ({
                 <CrosspostDropdownItem item={item} />}
               {me && !item.position &&
             !item.mine && !item.deletedAt &&
-            (item.meDontLikeSats > meTotalSats
+            (item.meDontLikeSats > meSats
               ? <DropdownItemUpVote item={item} />
               : <DontLikeThisDropdownItem item={item} />)}
               {me && sub && !item.mine && !item.outlawed && Number(me.id) === Number(sub.userId) && sub.moderated &&
@@ -268,4 +221,139 @@ export default function ItemInfo ({
       {extraInfo}
     </div>
   )
+}
+
+function InfoDropdownItem ({ item }) {
+  const { me } = useMe()
+  const showModal = useShowModal()
+
+  const onClick = () => {
+    showModal((onClose) => {
+      return (
+        <div className={styles.details}>
+          <div>id</div>
+          <div>{item.id}</div>
+          <div>created at</div>
+          <div>{item.createdAt}</div>
+          <div>cost</div>
+          <div>{item.cost}</div>
+          <div>sats</div>
+          <div>{item.sats}</div>
+          {me && (
+            <>
+              <div>sats from me</div>
+              <div>{item.meSats}</div>
+            </>
+          )}
+          <div>zappers</div>
+          <div>{item.upvotes}</div>
+        </div>
+      )
+    })
+  }
+
+  return (
+    <Dropdown.Item onClick={onClick}>
+      details
+    </Dropdown.Item>
+  )
+}
+
+function PaymentInfo ({ item, disableRetry, setDisableRetry }) {
+  const { me } = useMe()
+  const toaster = useToast()
+  const retryCreateItem = useRetryCreateItem({ id: item.id })
+  const waitForQrPayment = useQrPayment()
+  const [disableInfoRetry, setDisableInfoRetry] = useState(disableRetry)
+  if (item.deletedAt) return null
+
+  const disableDualRetry = disableRetry || disableInfoRetry
+  function setDisableDualRetry (value) {
+    setDisableInfoRetry(value)
+    setDisableRetry?.(value)
+  }
+
+  let Component
+  let onClick
+  if (me && item.invoice?.actionState && item.invoice?.actionState !== 'PAID') {
+    if (item.invoice?.actionState === 'FAILED') {
+      Component = () => <span className={classNames('text-warning', disableDualRetry && 'pulse')}>retry payment</span>
+      onClick = async () => {
+        if (disableDualRetry) return
+        setDisableDualRetry(true)
+        try {
+          const { error } = await retryCreateItem({ variables: { invoiceId: parseInt(item.invoice?.id) } })
+          if (error) throw error
+        } catch (error) {
+          toaster.danger(error.message)
+        } finally {
+          setDisableDualRetry(false)
+        }
+      }
+    } else {
+      Component = () => (
+        <span
+          className='text-info'
+        >pending
+        </span>
+      )
+      onClick = () => waitForQrPayment({ id: item.invoice?.id }, null, { cancelOnClose: false }).catch(console.error)
+    }
+  } else {
+    return null
+  }
+
+  return (
+    <>
+      <span> \ </span>
+      <span
+        className='text-reset pointer fw-bold'
+        onClick={onClick}
+      >
+        <Component />
+      </span>
+    </>
+  )
+}
+
+function EditInfo ({ item, edit, canEdit, setCanEdit, toggleEdit, editText, editThreshold }) {
+  const router = useRouter()
+
+  if (canEdit) {
+    return (
+      <>
+        <span> \ </span>
+        <span
+          className='text-reset pointer fw-bold'
+          onClick={() => toggleEdit ? toggleEdit() : router.push(`/items/${item.id}/edit`)}
+        >
+          <span>{editText || 'edit'} </span>
+          {(!item.invoice?.actionState || item.invoice?.actionState === 'PAID')
+            ? <Countdown
+                date={editThreshold}
+                onComplete={() => { setCanEdit(false) }}
+              />
+            : <span>10:00</span>}
+        </span>
+      </>
+    )
+  }
+
+  if (edit && !canEdit) {
+    // if we're still editing after timer ran out
+    return (
+      <>
+        <span> \ </span>
+        <span
+          className='text-reset pointer fw-bold'
+          onClick={() => toggleEdit ? toggleEdit() : router.push(`/items/${item.id}`)}
+        >
+          <span>cancel </span>
+          <span>00:00</span>
+        </span>
+      </>
+    )
+  }
+
+  return null
 }

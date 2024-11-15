@@ -3,6 +3,9 @@ import { COMMENTS } from './comments'
 import { SUB_FULL_FIELDS } from './subs'
 import { INVOICE_FIELDS } from './wallet'
 
+const HASH_HMAC_INPUT_1 = '$hash: String, $hmac: String'
+const HASH_HMAC_INPUT_2 = 'hash: $hash, hmac: $hmac'
+
 export const PAID_ACTION = gql`
   ${INVOICE_FIELDS}
   fragment PaidActionFields on PaidAction {
@@ -25,6 +28,18 @@ const ITEM_PAID_ACTION_FIELDS = gql`
       }
     }
   }`
+
+const ITEM_PAID_ACTION_FIELDS_NO_CHILD_COMMENTS = gql`
+  ${COMMENTS}
+  fragment ItemPaidActionFieldsNoChildComments on ItemPaidAction {
+    result {
+      id
+      deleteScheduledAt
+      reminderScheduledAt
+      ...CommentFields
+    }
+  }
+`
 
 const ITEM_ACT_PAID_ACTION_FIELDS = gql`
   fragment ItemActPaidActionFields on ItemActPaidAction {
@@ -115,9 +130,9 @@ export const ACT_MUTATION = gql`
 export const UPSERT_DISCUSSION = gql`
   ${PAID_ACTION}
   mutation upsertDiscussion($sub: String, $id: ID, $title: String!, $text: String,
-    $boost: Int, $forward: [ItemForwardInput]) {
+    $boost: Int, $forward: [ItemForwardInput], ${HASH_HMAC_INPUT_1}) {
     upsertDiscussion(sub: $sub, id: $id, title: $title, text: $text, boost: $boost,
-      forward: $forward) {
+      forward: $forward, ${HASH_HMAC_INPUT_2}) {
       result {
         id
         deleteScheduledAt
@@ -130,11 +145,11 @@ export const UPSERT_DISCUSSION = gql`
 export const UPSERT_JOB = gql`
   ${PAID_ACTION}
   mutation upsertJob($sub: String!, $id: ID, $title: String!, $company: String!,
-    $location: String, $remote: Boolean, $text: String!, $url: String!, $maxBid: Int!,
+    $location: String, $remote: Boolean, $text: String!, $url: String!, $boost: Int,
     $status: String, $logo: Int) {
     upsertJob(sub: $sub, id: $id, title: $title, company: $company,
       location: $location, remote: $remote, text: $text,
-      url: $url, maxBid: $maxBid, status: $status, logo: $logo) {
+      url: $url, boost: $boost, status: $status, logo: $logo) {
       result {
         id
         deleteScheduledAt
@@ -147,9 +162,9 @@ export const UPSERT_JOB = gql`
 export const UPSERT_LINK = gql`
   ${PAID_ACTION}
   mutation upsertLink($sub: String, $id: ID, $title: String!, $url: String!,
-    $text: String, $boost: Int, $forward: [ItemForwardInput]) {
+    $text: String, $boost: Int, $forward: [ItemForwardInput], ${HASH_HMAC_INPUT_1}) {
     upsertLink(sub: $sub, id: $id, title: $title, url: $url, text: $text,
-      boost: $boost, forward: $forward) {
+      boost: $boost, forward: $forward, ${HASH_HMAC_INPUT_2}) {
       result {
         id
         deleteScheduledAt
@@ -162,9 +177,11 @@ export const UPSERT_LINK = gql`
 export const UPSERT_POLL = gql`
   ${PAID_ACTION}
   mutation upsertPoll($sub: String, $id: ID, $title: String!, $text: String,
-    $options: [String!]!, $boost: Int, $forward: [ItemForwardInput], $pollExpiresAt: Date) {
+    $options: [String!]!, $boost: Int, $forward: [ItemForwardInput], $pollExpiresAt: Date,
+    ${HASH_HMAC_INPUT_1}) {
     upsertPoll(sub: $sub, id: $id, title: $title, text: $text,
-      options: $options, boost: $boost, forward: $forward, pollExpiresAt: $pollExpiresAt) {
+      options: $options, boost: $boost, forward: $forward, pollExpiresAt: $pollExpiresAt,
+      ${HASH_HMAC_INPUT_2}) {
       result {
         id
         deleteScheduledAt
@@ -200,6 +217,16 @@ export const POLL_VOTE = gql`
     }
   }`
 
+export const UPSERT_BIO = gql`
+  ${ITEM_PAID_ACTION_FIELDS}
+  ${PAID_ACTION}
+  mutation upsertBio($text: String!) {
+    upsertBio(text: $text) {
+      ...ItemPaidActionFields
+      ...PaidActionFields
+    }
+  }`
+
 export const CREATE_COMMENT = gql`
   ${ITEM_PAID_ACTION_FIELDS}
   ${PAID_ACTION}
@@ -211,11 +238,11 @@ export const CREATE_COMMENT = gql`
   }`
 
 export const UPDATE_COMMENT = gql`
-  ${ITEM_PAID_ACTION_FIELDS}
+  ${ITEM_PAID_ACTION_FIELDS_NO_CHILD_COMMENTS}
   ${PAID_ACTION}
-  mutation upsertComment($id: ID!, $text: String!) {
-    upsertComment(id: $id, text: $text) {
-      ...ItemPaidActionFields
+  mutation upsertComment($id: ID!, $text: String!, $boost: Int, ${HASH_HMAC_INPUT_1}) {
+    upsertComment(id: $id, text: $text, boost: $boost, ${HASH_HMAC_INPUT_2}) {
+      ...ItemPaidActionFieldsNoChildComments
       ...PaidActionFields
     }
   }`
@@ -223,10 +250,10 @@ export const UPDATE_COMMENT = gql`
 export const UPSERT_SUB = gql`
   ${PAID_ACTION}
   mutation upsertSub($oldName: String, $name: String!, $desc: String, $baseCost: Int!,
-    $postTypes: [String!]!, $allowFreebies: Boolean!, $billingType: String!,
+    $postTypes: [String!]!, $billingType: String!,
     $billingAutoRenew: Boolean!, $moderated: Boolean!, $nsfw: Boolean!) {
       upsertSub(oldName: $oldName, name: $name, desc: $desc, baseCost: $baseCost,
-        postTypes: $postTypes, allowFreebies: $allowFreebies, billingType: $billingType,
+        postTypes: $postTypes, billingType: $billingType,
         billingAutoRenew: $billingAutoRenew, moderated: $moderated, nsfw: $nsfw) {
       result {
         name
@@ -238,10 +265,10 @@ export const UPSERT_SUB = gql`
 export const UNARCHIVE_TERRITORY = gql`
   ${PAID_ACTION}
   mutation unarchiveTerritory($name: String!, $desc: String, $baseCost: Int!,
-    $postTypes: [String!]!, $allowFreebies: Boolean!, $billingType: String!,
+    $postTypes: [String!]!, $billingType: String!,
     $billingAutoRenew: Boolean!, $moderated: Boolean!, $nsfw: Boolean!) {
       unarchiveTerritory(name: $name, desc: $desc, baseCost: $baseCost,
-        postTypes: $postTypes, allowFreebies: $allowFreebies, billingType: $billingType,
+        postTypes: $postTypes, billingType: $billingType,
         billingAutoRenew: $billingAutoRenew, moderated: $moderated, nsfw: $nsfw) {
       result {
         name

@@ -83,19 +83,19 @@ export function middleware (request) {
 
   const cspHeader = [
     // if something is not explicitly allowed, we don't allow it.
-    "default-src 'none'",
+    "default-src 'self' a.stacker.news",
     "font-src 'self' a.stacker.news",
     // we want to load images from everywhere but we can limit to HTTPS at least
     "img-src 'self' a.stacker.news m.stacker.news https: data: blob:" + devSrc,
-    "media-src 'self' a.stacker.news m.stacker.news" + devSrc,
+    "media-src 'self' a.stacker.news m.stacker.news https: blob:" + devSrc,
     // Using nonces and strict-dynamic deploys a strict CSP.
     // see https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html#strict-policy.
     // Old browsers will ignore nonce and strict-dynamic and fallback to host-based matching and unsafe-inline
-    `script-src 'self' 'unsafe-inline' 'nonce-${nonce}' 'strict-dynamic' https:` + devScriptSrc,
+    `script-src 'self' a.stacker.news 'unsafe-inline' 'wasm-unsafe-eval' 'nonce-${nonce}' 'strict-dynamic' https:` + devScriptSrc,
     // unsafe-inline for styles is not ideal but okay if script-src is using nonces
     "style-src 'self' a.stacker.news 'unsafe-inline'",
     "manifest-src 'self'",
-    'frame-src www.youtube.com platform.twitter.com rumble.com bitcointv.com peertube.tv',
+    'frame-src www.youtube.com platform.twitter.com njump.me open.spotify.com rumble.com embed.wavlake.com bitcointv.com peertube.tv',
     "connect-src 'self' https: wss:" + devSrc,
     // disable dangerous plugins like Flash
     "object-src 'none'",

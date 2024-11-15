@@ -1,17 +1,43 @@
-import { USER_ID } from '@/lib/constants'
+import { PAID_ACTION_PAYMENT_METHODS, USER_ID } from '@/lib/constants'
 import { msatsToSats, satsToMsats } from '@/lib/format'
 import { notifyZapped } from '@/lib/webPush'
 
 export const anonable = true
-export const supportsPessimism = true
-export const supportsOptimism = true
+
+export const paymentMethods = [
+  PAID_ACTION_PAYMENT_METHODS.FEE_CREDIT,
+  PAID_ACTION_PAYMENT_METHODS.P2P,
+  PAID_ACTION_PAYMENT_METHODS.OPTIMISTIC,
+  PAID_ACTION_PAYMENT_METHODS.PESSIMISTIC
+]
 
 export async function getCost ({ sats }) {
   return satsToMsats(sats)
 }
 
-export async function perform ({ invoiceId, sats, id: itemId, ...args }, { me, cost, tx }) {
-  const feeMsats = cost / BigInt(10) // 10% fee
+export async function getInvoiceablePeer ({ id }, { models }) {
+  const item = await models.item.findUnique({
+    where: { id: parseInt(id) },
+    include: {
+      itemForwards: true,
+      user: {
+        include: {
+          wallets: true
+        }
+      }
+    }
+  })
+
+  // request peer invoice if they have an attached wallet and have not forwarded the item
+  return item.user.wallets.length > 0 && item.itemForwards.length === 0 ? item.userId : null
+}
+
+export async function getSybilFeePercent () {
+  return 30n
+}
+
+export async function perform ({ invoiceId, sats, id: itemId, ...args }, { me, cost, sybilFeePercent, tx }) {
+  const feeMsats = cost * sybilFeePercent / 100n
   const zapMsats = cost - feeMsats
   itemId = parseInt(itemId)
 
@@ -47,7 +73,7 @@ export async function retry ({ invoiceId, newInvoiceId }, { tx, cost }) {
   return { id, sats: msatsToSats(cost), act: 'TIP', path }
 }
 
-export async function onPaid ({ invoice, actIds }, { models, tx }) {
+export async function onPaid ({ invoice, actIds }, { tx }) {
   let acts
   if (invoice) {
     await tx.itemAct.updateMany({
@@ -77,23 +103,27 @@ export async function onPaid ({ invoice, actIds }, { models, tx }) {
     ), total_forwarded AS (
       SELECT COALESCE(SUM(msats), 0) as msats
       FROM forwardees
-    ), forward AS (
-      UPDATE users
-      SET
-        msats = users.msats + forwardees.msats,
-        "stackedMsats" = users."stackedMsats" + forwardees.msats
-      FROM forwardees
-      WHERE users.id = forwardees."userId"
+    ), recipients AS (
+      SELECT "userId", msats, msats AS "stackedMsats" FROM forwardees
+      UNION
+      SELECT ${itemAct.item.userId}::INTEGER as "userId",
+        CASE WHEN ${!!invoice?.invoiceForward}::BOOLEAN
+          THEN 0::BIGINT
+          ELSE ${itemAct.msats}::BIGINT - (SELECT msats FROM total_forwarded)::BIGINT
+        END as msats,
+        ${itemAct.msats}::BIGINT - (SELECT msats FROM total_forwarded)::BIGINT as "stackedMsats"
+      ORDER BY "userId" ASC -- order to prevent deadlocks
     )
     UPDATE users
     SET
-      msats = msats + ${itemAct.msats}::BIGINT - (SELECT msats FROM total_forwarded)::BIGINT,
-      "stackedMsats" = "stackedMsats" + ${itemAct.msats}::BIGINT - (SELECT msats FROM total_forwarded)::BIGINT
-    WHERE id = ${itemAct.item.userId}::INTEGER`
+      msats = users.msats + recipients.msats,
+      "stackedMsats" = users."stackedMsats" + recipients."stackedMsats"
+    FROM recipients
+    WHERE users.id = recipients."userId"`
 
   // perform denomormalized aggregates: weighted votes, upvotes, msats, lastZapAt
   // NOTE: for the rows that might be updated by a concurrent zap, we use UPDATE for implicit locking
-  const [item] = await tx.$queryRaw`
+  await tx.$queryRaw`
     WITH zapper AS (
       SELECT trust FROM users WHERE id = ${itemAct.userId}::INTEGER
     ), zap AS (
@@ -142,9 +172,14 @@ export async function onPaid ({ invoice, actIds }, { models, tx }) {
       SET "commentMsats" = "Item"."commentMsats" + ${msats}::BIGINT
       FROM zapped
       WHERE "Item".path @> zapped.path AND "Item".id <> zapped.id`
+}
 
-  // TODO: referrals
-  notifyZapped({ models, item }).catch(console.error)
+export async function nonCriticalSideEffects ({ invoice, actIds }, { models }) {
+  const itemAct = await models.itemAct.findFirst({
+    where: invoice ? { invoiceId: invoice.id } : { id: { in: actIds } },
+    include: { item: true }
+  })
+  notifyZapped({ models, item: itemAct.item }).catch(console.error)
 }
 
 export async function onFail ({ invoice }, { tx }) {

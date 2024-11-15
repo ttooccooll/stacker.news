@@ -30,6 +30,8 @@ model User {
   apiKeyHash                String?              @unique(map: "users.apikeyhash_unique") @db.Char(64)
   apiKeyEnabled             Boolean              @default(false)
   tipDefault                Int                  @default(100)
+  tipRandomMin              Int?
+  tipRandomMax              Int?
   bioId                     Int?
   inviteId                  String?
   tipPopover                Boolean              @default(false)
@@ -52,7 +54,7 @@ model User {
   upvoteTrust               Float                @default(0)
   hideInvoiceDesc           Boolean              @default(false)
   wildWestMode              Boolean              @default(false)
-  greeterMode               Boolean              @default(false)
+  satsFilter                Int                  @default(10)
   nsfwMode                  Boolean              @default(false)
   fiatCurrency              String               @default("USD")
   withdrawMaxFeeDefault     Int                  @default(10)
@@ -61,14 +63,19 @@ model User {
   turboTipping              Boolean              @default(false)
   zapUndos                  Int?
   imgproxyOnly              Boolean              @default(false)
+  showImagesAndVideos       Boolean              @default(true)
   hideWalletBalance         Boolean              @default(false)
+  disableFreebies           Boolean?
   referrerId                Int?
   nostrPubkey               String?
+  greeterMode               Boolean              @default(false)
   nostrAuthPubkey           String?              @unique(map: "users.nostrAuthPubkey_unique")
   nostrCrossposting         Boolean              @default(false)
   slashtagId                String?              @unique(map: "users.slashtagId_unique")
   noteCowboyHat             Boolean              @default(true)
   streak                    Int?
+  gunStreak                 Int?
+  horseStreak               Int?
   subs                      String[]
   hideCowboyHat             Boolean              @default(false)
   Bookmarks                 Bookmark[]
@@ -111,6 +118,7 @@ model User {
   lnAddr                    String?
   autoWithdrawMaxFeePercent Float?
   autoWithdrawThreshold     Int?
+  autoWithdrawMaxFeeTotal   Int?
   muters                    Mute[]               @relation("muter")
   muteds                    Mute[]               @relation("muted")
   ArcOut                    Arc[]                @relation("fromUser")
@@ -118,7 +126,7 @@ model User {
   Sub                       Sub[]
   SubAct                    SubAct[]
   MuteSub                   MuteSub[]
-  Wallet                    Wallet[]
+  wallets                   Wallet[]
   TerritoryTransfers        TerritoryTransfer[]  @relation("TerritoryTransfer_oldUser")
   TerritoryReceives         TerritoryTransfer[]  @relation("TerritoryTransfer_newUser")
   AncestorReplies           Reply[]              @relation("AncestorReplyUser")
@@ -129,10 +137,16 @@ model User {
   ItemUserAgg               ItemUserAgg[]
   oneDayReferrals           OneDayReferral[]     @relation("OneDayReferral_referrer")
   oneDayReferrees           OneDayReferral[]     @relation("OneDayReferral_referrees")
+  vaultKeyHash              String               @default("")
+  walletsUpdatedAt          DateTime?
+  vaultEntries              VaultEntry[]         @relation("VaultEntries")
 
   @@index([photoId])
   @@index([createdAt], map: "users.created_at_index")
   @@index([inviteId], map: "users.inviteId_index")
+  @@index([streak])
+  @@index([gunStreak])
+  @@index([horseStreak])
   @@map("users")
 }
 
@@ -165,6 +179,12 @@ enum WalletType {
   LIGHTNING_ADDRESS
   LND
   CLN
+  LNBITS
+  NWC
+  PHOENIXD
+  BLINK
+  LNC
+  WEBLN
 }
 
 model Wallet {
@@ -173,6 +193,7 @@ model Wallet {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
   userId    Int
   label     String?
+  enabled   Boolean  @default(true)
   priority  Int      @default(0)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -187,9 +208,33 @@ model Wallet {
   walletLightningAddress WalletLightningAddress?
   walletLND              WalletLND?
   walletCLN              WalletCLN?
-  withdrawals            Withdrawl[]
+  walletLNbits           WalletLNbits?
+  walletNWC              WalletNWC?
+  walletPhoenixd         WalletPhoenixd?
+  walletBlink            WalletBlink?
+
+  vaultEntries   VaultEntry[]     @relation("VaultEntries")
+  withdrawals    Withdrawl[]
+  InvoiceForward InvoiceForward[]
 
   @@index([userId])
+  @@index([priority])
+}
+
+model VaultEntry {
+  id        Int      @id @default(autoincrement())
+  key       String   @db.Text
+  iv        String   @db.Text
+  value     String   @db.Text
+  userId    Int
+  walletId  Int?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade, name: "VaultEntries")
+  wallet    Wallet?  @relation(fields: [walletId], references: [id], onDelete: Cascade, name: "VaultEntries")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([userId, key])
+  @@index([walletId])
 }
 
 model WalletLog {
@@ -200,6 +245,7 @@ model WalletLog {
   wallet    WalletType
   level     LogLevel
   message   String
+  context   Json?      @db.JsonB
 
   @@index([userId, createdAt])
 }
@@ -235,6 +281,45 @@ model WalletCLN {
   cert      String?
 }
 
+model WalletLNbits {
+  id         Int      @id @default(autoincrement())
+  walletId   Int      @unique
+  wallet     Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+  url        String
+  invoiceKey String
+}
+
+model WalletNWC {
+  id         Int      @id @default(autoincrement())
+  walletId   Int      @unique
+  wallet     Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+  nwcUrlRecv String
+}
+
+model WalletBlink {
+  id           Int      @id @default(autoincrement())
+  walletId     Int      @unique
+  wallet       Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+  apiKeyRecv   String
+  currencyRecv String?
+}
+
+model WalletPhoenixd {
+  id                Int      @id @default(autoincrement())
+  walletId          Int      @unique
+  wallet            Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+  url               String
+  secondaryPassword String
+}
+
 model Mute {
   muterId   Int
   mutedId   Int
@@ -258,17 +343,25 @@ model Arc {
   @@index([toId, fromId])
 }
 
-model Streak {
-  id        Int       @id @default(autoincrement())
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at")
-  startedAt DateTime  @db.Date
-  endedAt   DateTime? @db.Date
-  userId    Int
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+enum StreakType {
+  COWBOY_HAT
+  GUN
+  HORSE
+}
 
-  @@unique([startedAt, userId], map: "Streak.startedAt_userId_unique")
+model Streak {
+  id        Int        @id @default(autoincrement())
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @default(now()) @updatedAt @map("updated_at")
+  startedAt DateTime   @db.Date
+  endedAt   DateTime?  @db.Date
+  userId    Int
+  type      StreakType @default(COWBOY_HAT)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([startedAt, userId, type])
   @@index([userId], map: "Streak.userId_index")
+  @@index([type])
 }
 
 model NostrRelay {
@@ -415,6 +508,7 @@ model Item {
   company             String?
   weightedVotes       Float                 @default(0)
   boost               Int                   @default(0)
+  oldBoost            Int                   @default(0)
   pollCost            Int?
   paidImgLink         Boolean               @default(false)
   commentMsats        BigInt                @default(0)
@@ -422,6 +516,7 @@ model Item {
   lastZapAt           DateTime?
   ncomments           Int                   @default(0)
   msats               BigInt                @default(0)
+  cost                Int                   @default(0)
   weightedDownVotes   Float                 @default(0)
   bio                 Boolean               @default(false)
   freebie             Boolean               @default(false)
@@ -486,6 +581,9 @@ model Item {
   @@index([weightedVotes], map: "Item.weightedVotes_index")
   @@index([invoiceId])
   @@index([invoiceActionState])
+  @@index([cost])
+  @@index([url])
+  @@index([boost])
 }
 
 // we use this to denormalize a user's aggregated interactions (zaps) with an item
@@ -759,6 +857,7 @@ enum InvoiceActionType {
   ITEM_UPDATE
   ZAP
   DOWN_ZAP
+  BOOST
   DONATE
   POLL_VOTE
   TERRITORY_CREATE
@@ -773,7 +872,11 @@ enum InvoiceActionState {
   HELD
   PAID
   FAILED
+  FORWARDING
+  FORWARDED
+  FAILED_FORWARD
   RETRYING
+  CANCELING
 }
 
 model ItemMention {
@@ -792,42 +895,71 @@ model ItemMention {
 }
 
 model Invoice {
-  id             Int       @id @default(autoincrement())
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+  id             Int             @id @default(autoincrement())
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @default(now()) @updatedAt @map("updated_at")
   userId         Int
-  hash           String    @unique(map: "Invoice.hash_unique")
-  preimage       String?   @unique(map: "Invoice.preimage_unique")
+  hash           String          @unique(map: "Invoice.hash_unique")
+  preimage       String?         @unique(map: "Invoice.preimage_unique")
   isHeld         Boolean?
   bolt11         String
   expiresAt      DateTime
   confirmedAt    DateTime?
   confirmedIndex BigInt?
-  cancelled      Boolean   @default(false)
+  cancelled      Boolean         @default(false)
   msatsRequested BigInt
   msatsReceived  BigInt?
   desc           String?
   comment        String?
   lud18Data      Json?
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoiceForward InvoiceForward?
 
-  actionState   InvoiceActionState?
-  actionType    InvoiceActionType?
-  actionId      Int?
-  actionArgs    Json?               @db.JsonB
-  actionError   String?
-  actionResult  Json?               @db.JsonB
-  ItemAct       ItemAct[]
-  Item          Item[]
-  Upload        Upload[]
-  PollVote      PollVote[]
-  PollBlindVote PollBlindVote[]
+  actionState      InvoiceActionState?
+  actionType       InvoiceActionType?
+  actionOptimistic Boolean?
+  actionId         Int?
+  actionArgs       Json?               @db.JsonB
+  actionError      String?
+  actionResult     Json?               @db.JsonB
+  ItemAct          ItemAct[]
+  Item             Item[]
+  Upload           Upload[]
+  PollVote         PollVote[]
+  PollBlindVote    PollBlindVote[]
 
   @@index([createdAt], map: "Invoice.created_at_index")
   @@index([userId], map: "Invoice.userId_index")
   @@index([confirmedIndex], map: "Invoice.confirmedIndex_index")
-  @@index([actionState])
+  @@index([isHeld])
+  @@index([confirmedAt])
   @@index([actionType])
+  @@index([actionState])
+}
+
+model InvoiceForward {
+  id          Int      @id @default(autoincrement())
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  bolt11      String
+  maxFeeMsats Int
+  walletId    Int
+
+  // we get these values when the invoice is held
+  expiryHeight Int?
+  acceptHeight Int?
+
+  // we get these values when the outgoing invoice is settled
+  invoiceId   Int  @unique
+  withdrawlId Int?
+
+  invoice   Invoice    @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  wallet    Wallet     @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  withdrawl Withdrawl? @relation(fields: [withdrawlId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([walletId])
+  @@index([withdrawlId])
 }
 
 model Withdrawl {
@@ -836,6 +968,7 @@ model Withdrawl {
   updatedAt      DateTime         @default(now()) @updatedAt @map("updated_at")
   userId         Int
   hash           String?
+  preimage       String?
   bolt11         String?
   msatsPaying    BigInt
   msatsPaid      BigInt?
@@ -846,10 +979,14 @@ model Withdrawl {
   walletId       Int?
   user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   wallet         Wallet?          @relation(fields: [walletId], references: [id], onDelete: SetNull)
+  invoiceForward InvoiceForward[]
 
   @@index([createdAt], map: "Withdrawl.created_at_index")
   @@index([userId], map: "Withdrawl.userId_index")
   @@index([hash])
+  @@index([walletId])
+  @@index([autoWithdraw])
+  @@index([status])
 }
 
 model Account {

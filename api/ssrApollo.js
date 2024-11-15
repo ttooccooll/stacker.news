@@ -40,17 +40,17 @@ export default async function getSSRApolloClient ({ req, res, me = null }) {
       watchQuery: {
         fetchPolicy: 'no-cache',
         nextFetchPolicy: 'no-cache',
-        canonizeResults: true,
         ssr: true
       },
       query: {
         fetchPolicy: 'no-cache',
         nextFetchPolicy: 'no-cache',
-        canonizeResults: true,
         ssr: true
       }
     }
   })
+
+  await client.clearStore()
   return client
 }
 
@@ -139,10 +139,20 @@ export function getGetServerSideProps (
 
     const client = await getSSRApolloClient({ req, res })
 
-    const { data: { me } } = await client.query({ query: ME })
+    let { data: { me } } = await client.query({ query: ME })
+
+    // required to redirect to /signup on page reload
+    // if we switched to anon and authentication is required
+    if (req.cookies['multi_auth.user-id'] === 'anonymous') {
+      me = null
+    }
 
     if (authRequired && !me) {
-      const callback = process.env.NEXT_PUBLIC_URL + req.url
+      let callback = process.env.NEXT_PUBLIC_URL + req.url
+      // On client-side routing, the callback is a NextJS URL
+      // so we need to remove the NextJS stuff.
+      // Example: /_next/data/development/territory.json
+      callback = callback.replace(/\/_next\/data\/\w+\//, '/').replace(/\.json$/, '')
       return {
         redirect: {
           destination: `/signup?callbackUrl=${encodeURIComponent(callback)}`
@@ -174,6 +184,7 @@ export function getGetServerSideProps (
       }
 
       if (error || !data || (notFound && notFound(data, vars, me))) {
+        error && console.error(error)
         res.writeHead(302, {
           Location: '/404'
         }).end()

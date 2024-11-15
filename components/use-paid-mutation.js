@@ -1,6 +1,7 @@
 import { useApolloClient, useLazyQuery, useMutation } from '@apollo/client'
 import { useCallback, useState } from 'react'
-import { InvoiceCanceledError, InvoiceExpiredError, useQrPayment, useWebLnPayment } from './payment'
+import { useInvoice, useQrPayment, useWalletPayment } from './payment'
+import { InvoiceCanceledError, InvoiceExpiredError } from '@/wallets/errors'
 import { GET_PAID_ACTION } from '@/fragments/paidAction'
 
 /*
@@ -22,27 +23,33 @@ export function usePaidMutation (mutation,
   const [getPaidAction] = useLazyQuery(GET_PAID_ACTION, {
     fetchPolicy: 'network-only'
   })
-  const waitForWebLnPayment = useWebLnPayment()
+  const waitForWalletPayment = useWalletPayment()
+  const invoiceHelper = useInvoice()
   const waitForQrPayment = useQrPayment()
   const client = useApolloClient()
   // innerResult is used to store/control the result of the mutation when innerMutate runs
   const [innerResult, setInnerResult] = useState(result)
 
-  const waitForPayment = useCallback(async (invoice, { persistOnNavigate = false, waitFor }) => {
-    let webLnError
+  const waitForPayment = useCallback(async (invoice, { alwaysShowQROnFailure = false, persistOnNavigate = false, waitFor }) => {
+    let walletError
     const start = Date.now()
     try {
-      return await waitForWebLnPayment(invoice, waitFor)
+      return await waitForWalletPayment(invoice, waitFor)
     } catch (err) {
-      if (Date.now() - start > 1000 || err instanceof InvoiceCanceledError || err instanceof InvoiceExpiredError) {
+      if (
+        (!alwaysShowQROnFailure && Date.now() - start > 1000) ||
+        err instanceof InvoiceCanceledError ||
+        err instanceof InvoiceExpiredError) {
         // bail since qr code payment will also fail
         // also bail if the payment took more than 1 second
+        // and cancel the invoice if it's not already canceled so it can be retried
+        invoiceHelper.cancel(invoice).catch(console.error)
         throw err
       }
-      webLnError = err
+      walletError = err
     }
-    return await waitForQrPayment(invoice, webLnError, { persistOnNavigate, waitFor })
-  }, [waitForWebLnPayment, waitForQrPayment])
+    return await waitForQrPayment(invoice, walletError, { persistOnNavigate, waitFor })
+  }, [waitForWalletPayment, waitForQrPayment, invoiceHelper])
 
   const innerMutate = useCallback(async ({
     onCompleted: innerOnCompleted, ...innerOptions
@@ -51,7 +58,10 @@ export function usePaidMutation (mutation,
     let { data, ...rest } = await mutate(innerOptions)
 
     // use the most inner callbacks/options if they exist
-    const { onPaid, onPayError, forceWaitForPayment, persistOnNavigate, update } = { ...options, ...innerOptions }
+    const {
+      onPaid, onPayError, forceWaitForPayment, persistOnNavigate,
+      update, waitFor = inv => inv?.actionState === 'PAID'
+    } = { ...options, ...innerOptions }
     const ourOnCompleted = innerOnCompleted || onCompleted
 
     // get invoice without knowing the mutation name
@@ -76,7 +86,7 @@ export function usePaidMutation (mutation,
         // onCompleted is called before the invoice is paid for optimistic updates
         ourOnCompleted?.(data)
         // don't wait to pay the invoice
-        waitForPayment(invoice, { persistOnNavigate }).then(() => {
+        waitForPayment(invoice, { persistOnNavigate, waitFor }).then(() => {
           onPaid?.(client.cache, { data })
         }).catch(e => {
           console.error('usePaidMutation: failed to pay invoice', e)
@@ -89,12 +99,18 @@ export function usePaidMutation (mutation,
         // the action is pessimistic
         try {
           // wait for the invoice to be paid
-          await waitForPayment(invoice, { persistOnNavigate, waitFor: inv => inv?.actionState === 'PAID' })
+          await waitForPayment(invoice, { alwaysShowQROnFailure: true, persistOnNavigate, waitFor })
           if (!response.result) {
             // if the mutation didn't return any data, ie pessimistic, we need to fetch it
             const { data: { paidAction } } = await getPaidAction({ variables: { invoiceId: parseInt(invoice.id) } })
             // create new data object
-            data = { [Object.keys(data)[0]]: paidAction }
+            // ( hmac is only returned on invoice creation so we need to add it back to the data )
+            data = {
+              [Object.keys(data)[0]]: {
+                ...paidAction,
+                invoice: { ...paidAction.invoice, hmac: invoice.hmac }
+              }
+            }
             // we need to run update functions on mutations now that we have the data
             update?.(client.cache, { data })
           }
@@ -163,7 +179,8 @@ export const paidActionCacheMods = {
       id: `Invoice:${invoice.id}`,
       fields: {
         actionState: () => 'PAID',
-        confirmedAt: () => new Date().toISOString()
+        confirmedAt: () => new Date().toISOString(),
+        satsReceived: () => invoice.satsRequested
       }
     })
   }

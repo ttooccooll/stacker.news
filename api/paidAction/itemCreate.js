@@ -1,28 +1,34 @@
-import { ANON_ITEM_SPAM_INTERVAL, ITEM_SPAM_INTERVAL, USER_ID } from '@/lib/constants'
+import { ANON_ITEM_SPAM_INTERVAL, ITEM_SPAM_INTERVAL, PAID_ACTION_PAYMENT_METHODS, USER_ID } from '@/lib/constants'
 import { notifyItemMention, notifyItemParents, notifyMention, notifyTerritorySubscribers, notifyUserSubscribers } from '@/lib/webPush'
 import { getItemMentions, getMentions, performBotBehavior } from './lib/item'
-import { satsToMsats } from '@/lib/format'
+import { msatsToSats, satsToMsats } from '@/lib/format'
 
 export const anonable = true
-export const supportsPessimism = true
-export const supportsOptimism = true
+
+export const paymentMethods = [
+  PAID_ACTION_PAYMENT_METHODS.FEE_CREDIT,
+  PAID_ACTION_PAYMENT_METHODS.OPTIMISTIC,
+  PAID_ACTION_PAYMENT_METHODS.PESSIMISTIC
+]
 
 export async function getCost ({ subName, parentId, uploadIds, boost = 0, bio }, { models, me }) {
   const sub = (parentId || bio) ? null : await models.sub.findUnique({ where: { name: subName } })
   const baseCost = sub ? satsToMsats(sub.baseCost) : 1000n
 
-  // cost = baseCost * 10^num_items_in_10m * 100 (anon) or 1 (user) + image fees + boost
+  // cost = baseCost * 10^num_items_in_10m * 100 (anon) or 1 (user) + upload fees + boost
   const [{ cost }] = await models.$queryRaw`
     SELECT ${baseCost}::INTEGER
       * POWER(10, item_spam(${parseInt(parentId)}::INTEGER, ${me?.id ?? USER_ID.anon}::INTEGER,
           ${me?.id && !bio ? ITEM_SPAM_INTERVAL : ANON_ITEM_SPAM_INTERVAL}::INTERVAL))
       * ${me ? 1 : 100}::INTEGER
-      + (SELECT "nUnpaid" * "imageFeeMsats"
-          FROM image_fees_info(${me?.id || USER_ID.anon}::INTEGER, ${uploadIds}::INTEGER[]))
+      + (SELECT "nUnpaid" * "uploadFeesMsats"
+          FROM upload_fees(${me?.id || USER_ID.anon}::INTEGER, ${uploadIds}::INTEGER[]))
       + ${satsToMsats(boost)}::INTEGER as cost`
 
-  // sub allows freebies (or is a bio or a comment), cost is less than baseCost, not anon, and cost must be greater than user's balance
-  const freebie = (parentId || bio || sub?.allowFreebies) && cost <= baseCost && !!me && cost > me?.msats
+  // sub allows freebies (or is a bio or a comment), cost is less than baseCost, not anon,
+  // cost must be greater than user's balance, and user has not disabled freebies
+  const freebie = (parentId || bio) && cost <= baseCost && !!me &&
+    cost > me?.msats && !me?.disableFreebies
 
   return freebie ? BigInt(0) : BigInt(cost)
 }
@@ -51,8 +57,7 @@ export async function perform (args, context) {
     itemActs.push({
       msats: cost - boostMsats, act: 'FEE', userId: data.userId, ...invoiceData
     })
-  } else {
-    data.freebie = true
+    data.cost = msatsToSats(cost - boostMsats)
   }
 
   const mentions = await getMentions(args, context)
@@ -153,15 +158,13 @@ export async function retry ({ invoiceId, newInvoiceId }, { tx }) {
 }
 
 export async function onPaid ({ invoice, id }, context) {
-  const { models, tx } = context
+  const { tx } = context
   let item
 
   if (invoice) {
     item = await tx.item.findFirst({
       where: { invoiceId: invoice.id },
       include: {
-        mentions: true,
-        itemReferrers: { include: { refereeItem: true } },
         user: true
       }
     })
@@ -172,8 +175,6 @@ export async function onPaid ({ invoice, id }, context) {
     item = await tx.item.findUnique({
       where: { id },
       include: {
-        mentions: true,
-        itemReferrers: { include: { refereeItem: true } },
         user: true,
         itemUploads: { include: { upload: true } }
       }
@@ -194,21 +195,27 @@ export async function onPaid ({ invoice, id }, context) {
     INSERT INTO pgboss.job (name, data, retrylimit, retrybackoff, startafter)
     VALUES ('imgproxy', jsonb_build_object('id', ${item.id}::INTEGER), 21, true, now() + interval '5 seconds')`
 
-  // TODO: referals for boost
+  if (item.boost > 0) {
+    await tx.$executeRaw`
+    INSERT INTO pgboss.job (name, data, retrylimit, retrybackoff, startafter, expirein)
+    VALUES ('expireBoost', jsonb_build_object('id', ${item.id}::INTEGER), 21, true,
+              now() + interval '30 days', interval '40 days')`
+  }
 
   if (item.parentId) {
     // denormalize ncomments, lastCommentAt, and "weightedComments" for ancestors, and insert into reply table
     await tx.$executeRaw`
       WITH comment AS (
-        SELECT *
+        SELECT "Item".*, users.trust
         FROM "Item"
-        WHERE id = ${item.id}::INTEGER
+        JOIN users ON "Item"."userId" = users.id
+        WHERE "Item".id = ${item.id}::INTEGER
       ), ancestors AS (
         UPDATE "Item"
         SET ncomments = "Item".ncomments + 1,
           "lastCommentAt" = now(),
           "weightedComments" = "Item"."weightedComments" +
-            CASE WHEN comment."userId" = "Item"."userId" THEN 0 ELSE ${item.user.trust}::FLOAT END
+            CASE WHEN comment."userId" = "Item"."userId" THEN 0 ELSE comment.trust END
         FROM comment
         WHERE "Item".path @> comment.path AND "Item".id <> comment.id
         RETURNING "Item".*
@@ -216,18 +223,30 @@ export async function onPaid ({ invoice, id }, context) {
       INSERT INTO "Reply" (created_at, updated_at, "ancestorId", "ancestorUserId", "itemId", "userId", level)
         SELECT comment.created_at, comment.updated_at, ancestors.id, ancestors."userId",
           comment.id, comment."userId", nlevel(comment.path) - nlevel(ancestors.path)
-        FROM ancestors, comment
-        WHERE ancestors."userId" <> comment."userId"`
+        FROM ancestors, comment`
+  }
+}
 
+export async function nonCriticalSideEffects ({ invoice, id }, { models }) {
+  const item = await models.item.findFirst({
+    where: invoice ? { invoiceId: invoice.id } : { id: parseInt(id) },
+    include: {
+      mentions: true,
+      itemReferrers: { include: { refereeItem: true } },
+      user: true
+    }
+  })
+
+  if (item.parentId) {
     notifyItemParents({ item, models }).catch(console.error)
   }
-
   for (const { userId } of item.mentions) {
     notifyMention({ models, item, userId }).catch(console.error)
   }
   for (const { refereeItem } of item.itemReferrers) {
     notifyItemMention({ models, referrerItem: item, refereeItem }).catch(console.error)
   }
+
   notifyUserSubscribers({ models, item }).catch(console.error)
   notifyTerritorySubscribers({ models, item }).catch(console.error)
 }

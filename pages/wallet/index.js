@@ -22,7 +22,7 @@ import HiddenWalletSummary from '@/components/hidden-wallet-summary'
 import AccordianItem from '@/components/accordian-item'
 import { lnAddrOptions } from '@/lib/lnurl'
 import useDebounceCallback from '@/components/use-debounce-callback'
-import { QrScanner } from '@yudiel/react-qr-scanner'
+import { Scanner } from '@yudiel/react-qr-scanner'
 import CameraIcon from '@/svgs/camera-line.svg'
 import { useShowModal } from '@/components/modal'
 import { useField } from 'formik'
@@ -61,7 +61,7 @@ export default function Wallet () {
 }
 
 function YouHaveSats () {
-  const me = useMe()
+  const { me } = useMe()
   const limitReached = me?.privates?.sats >= msatsToSats(BALANCE_LIMIT_MSATS)
   return (
     <h2 className={`${me ? 'visible' : 'invisible'} ${limitReached ? 'text-warning' : 'text-success'}`}>
@@ -108,7 +108,7 @@ export function WalletForm () {
 }
 
 export function FundForm () {
-  const me = useMe()
+  const { me } = useMe()
   const [showAlert, setShowAlert] = useState(true)
   const router = useRouter()
   const [createInvoice, { called, error }] = useMutation(gql`
@@ -211,7 +211,7 @@ export function SelectedWithdrawalForm () {
 
 export function InvWithdrawal () {
   const router = useRouter()
-  const me = useMe()
+  const { me } = useMe()
 
   const [createWithdrawl, { called, error }] = useMutation(CREATE_WITHDRAWL)
 
@@ -282,16 +282,23 @@ function InvoiceScanner ({ fieldName }) {
       onClick={() => {
         showModal(onClose => {
           return (
-            <QrScanner
-              onDecode={(result) => {
+            <Scanner
+              formats={['qr_code']}
+              onScan={([{ rawValue: result }]) => {
+                result = result.toLowerCase()
                 if (result.split('lightning=')[1]) {
-                  helpers.setValue(result.split('lightning=')[1].split(/[&?]/)[0].toLowerCase())
+                  helpers.setValue(result.split('lightning=')[1].split(/[&?]/)[0])
                 } else if (decode(result.replace(/^lightning:/, ''))) {
-                  helpers.setValue(result.replace(/^lightning:/, '').toLowerCase())
+                  helpers.setValue(result.replace(/^lightning:/, ''))
                 } else {
                   throw new Error('Not a proper lightning payment request')
                 }
                 onClose()
+              }}
+              styles={{
+                video: {
+                  aspectRatio: '1 / 1'
+                }
               }}
               onError={(error) => {
                 if (error instanceof DOMException) {
@@ -358,7 +365,7 @@ export function LnWithdrawal () {
 }
 
 export function LnAddrWithdrawal () {
-  const me = useMe()
+  const { me } = useMe()
   const router = useRouter()
   const [sendToLnAddr, { called, error }] = useMutation(SEND_TO_LNADDR)
   const defaultOptions = { min: 1 }

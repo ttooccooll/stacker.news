@@ -1,5 +1,5 @@
 import { gql } from 'graphql-tag'
-import search from '@/api/search/index.js'
+import search from '@/api/search/index'
 import removeMd from 'remove-markdown'
 
 const ITEM_SEARCH_FIELDS = gql`
@@ -22,7 +22,6 @@ const ITEM_SEARCH_FIELDS = gql`
       subName
     }
     status
-    maxBid
     company
     location
     remote

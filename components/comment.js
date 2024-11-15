@@ -25,6 +25,7 @@ import Skull from '@/svgs/death-skull.svg'
 import { commentSubTreeRootId } from '@/lib/item'
 import Pin from '@/svgs/pushpin-fill.svg'
 import LinkToContext from './link-to-context'
+import Boost from './boost-button'
 
 function Parent ({ item, rootText }) {
   const root = useRoot()
@@ -93,11 +94,11 @@ export function CommentFlat ({ item, rank, siblingComments, ...props }) {
 
 export default function Comment ({
   item, children, replyOpen, includeParent, topLevel,
-  rootText, noComments, noReply, truncate, depth, pin
+  rootText, noComments, noReply, truncate, depth, pin, setDisableRetry, disableRetry
 }) {
   const [edit, setEdit] = useState()
-  const me = useMe()
-  const isHiddenFreebie = !me?.privates?.wildWestMode && !me?.privates?.greeterMode && !item.mine && item.freebie && !item.freedFreebie
+  const { me } = useMe()
+  const isHiddenFreebie = me?.privates?.satsFilter !== 0 && !item.mine && item.freebie && !item.freedFreebie
   const [collapse, setCollapse] = useState(
     (isHiddenFreebie || item?.user?.meMute || (item?.outlawed && !me?.privates?.wildWestMode)) && !includeParent
       ? 'yep'
@@ -144,9 +145,11 @@ export default function Comment ({
       <div className={`${itemStyles.item} ${styles.item}`}>
         {item.outlawed && !me?.privates?.wildWestMode
           ? <Skull className={styles.dontLike} width={24} height={24} />
-          : item.meDontLikeSats > item.meSats
-            ? <DownZap width={24} height={24} className={styles.dontLike} item={item} />
-            : pin ? <Pin width={22} height={22} className={styles.pin} /> : <UpVote item={item} className={styles.upvote} />}
+          : item.mine
+            ? <Boost item={item} className={styles.upvote} />
+            : item.meDontLikeSats > item.meSats
+              ? <DownZap width={24} height={24} className={styles.dontLike} item={item} />
+              : pin ? <Pin width={22} height={22} className={styles.pin} /> : <UpVote item={item} className={styles.upvote} />}
         <div className={`${itemStyles.hunk} ${styles.hunk}`}>
           <div className='d-flex align-items-center'>
             {item.user?.meMute && !includeParent && collapse === 'yep'
@@ -166,6 +169,8 @@ export default function Comment ({
                   embellishUser={op && <><span> </span><Badge bg={op === 'fwd' ? 'secondary' : 'boost'} className={`${styles.op} bg-opacity-75`}>{op}</Badge></>}
                   onQuoteReply={quoteReply}
                   nested={!includeParent}
+                  setDisableRetry={setDisableRetry}
+                  disableRetry={disableRetry}
                   extraInfo={
                     <>
                       {includeParent && <Parent item={item} rootText={rootText} />}
@@ -175,7 +180,8 @@ export default function Comment ({
                         </ActionTooltip>}
                     </>
                   }
-                  onEdit={e => { setEdit(!edit) }}
+                  edit={edit}
+                  toggleEdit={e => { setEdit(!edit) }}
                   editText={edit ? 'cancel' : 'edit'}
                 />}
 

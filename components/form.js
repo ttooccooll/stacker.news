@@ -9,7 +9,7 @@ import Dropdown from 'react-bootstrap/Dropdown'
 import Nav from 'react-bootstrap/Nav'
 import Row from 'react-bootstrap/Row'
 import Markdown from '@/svgs/markdown-line.svg'
-import AddImageIcon from '@/svgs/image-add-line.svg'
+import AddFileIcon from '@/svgs/file-upload-line.svg'
 import styles from './form.module.css'
 import Text from '@/components/text'
 import AddIcon from '@/svgs/add-fill.svg'
@@ -23,7 +23,7 @@ import textAreaCaret from 'textarea-caret'
 import ReactDatePicker from 'react-datepicker'
 import 'react-datepicker/dist/react-datepicker.css'
 import useDebounceCallback, { debounce } from './use-debounce-callback'
-import { ImageUpload } from './image'
+import { FileUpload } from './file-upload'
 import { AWS_S3_URL_REGEXP } from '@/lib/constants'
 import { whenRange } from '@/lib/time'
 import { useFeeButton } from './fee-button'
@@ -33,6 +33,14 @@ import EyeClose from '@/svgs/eye-close-line.svg'
 import Info from './info'
 import { useMe } from './me'
 import classNames from 'classnames'
+import Clipboard from '@/svgs/clipboard-line.svg'
+import QrIcon from '@/svgs/qr-code-line.svg'
+import QrScanIcon from '@/svgs/qr-scan-line.svg'
+import { useShowModal } from './modal'
+import { QRCodeSVG } from 'qrcode.react'
+import { Scanner } from '@yudiel/react-qr-scanner'
+import { qrImageSettings } from './qr'
+import { useIsClient } from './use-client'
 
 export class SessionRequiredError extends Error {
   constructor () {
@@ -42,7 +50,7 @@ export class SessionRequiredError extends Error {
 }
 
 export function SubmitButton ({
-  children, variant, value, onClick, disabled, appendText, submittingText,
+  children, variant, valueName = 'submit', value, onClick, disabled, appendText, submittingText,
   className, ...props
 }) {
   const formik = useFormikContext()
@@ -53,12 +61,12 @@ export function SubmitButton ({
   return (
     <Button
       variant={variant || 'main'}
-      className={classNames(formik.isSubmitting && styles.pending, className)}
+      className={classNames(formik.isSubmitting && 'pulse', className)}
       type='submit'
       disabled={disabled}
       onClick={value
         ? e => {
-          formik.setFieldValue('submit', value)
+          formik.setFieldValue(valueName, value)
           onClick && onClick(e)
         }
         : onClick}
@@ -69,31 +77,41 @@ export function SubmitButton ({
   )
 }
 
-export function CopyInput (props) {
+function CopyButton ({ value, icon, ...props }) {
   const toaster = useToast()
   const [copied, setCopied] = useState(false)
 
-  const handleClick = async () => {
+  const handleClick = useCallback(async () => {
     try {
-      await copy(props.placeholder)
+      await copy(value)
       toaster.success('copied')
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch (err) {
       toaster.danger('failed to copy')
     }
+  }, [toaster, value])
+
+  if (icon) {
+    return (
+      <InputGroup.Text style={{ cursor: 'pointer' }} onClick={handleClick}>
+        <Clipboard height={20} width={20} />
+      </InputGroup.Text>
+    )
   }
 
   return (
+    <Button className={styles.appendButton} {...props} onClick={handleClick}>
+      {copied ? <Thumb width={18} height={18} /> : 'copy'}
+    </Button>
+  )
+}
+
+export function CopyInput (props) {
+  return (
     <Input
-      onClick={handleClick}
       append={
-        <Button
-          className={styles.appendButton}
-          size={props.size}
-          onClick={handleClick}
-        >{copied ? <Thumb width={18} height={18} /> : 'copy'}
-        </Button>
+        <CopyButton value={props.placeholder} size={props.size} />
       }
       {...props}
     />
@@ -122,12 +140,12 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
   const previousTab = useRef(tab)
   const { merge, setDisabled: setSubmitDisabled } = useFeeButton()
 
-  const [updateImageFeesInfo] = useLazyQuery(gql`
-    query imageFeesInfo($s3Keys: [Int]!) {
-      imageFeesInfo(s3Keys: $s3Keys) {
+  const [updateUploadFees] = useLazyQuery(gql`
+    query uploadFees($s3Keys: [Int]!) {
+      uploadFees(s3Keys: $s3Keys) {
         totalFees
         nUnpaid
-        imageFee
+        uploadFees
         bytes24h
       }
     }`, {
@@ -136,13 +154,14 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
     onError: (err) => {
       console.error(err)
     },
-    onCompleted: ({ imageFeesInfo }) => {
+    onCompleted: ({ uploadFees }) => {
       merge({
-        imageFee: {
-          term: `+ ${numWithUnits(imageFeesInfo.totalFees, { abbreviate: false })}`,
-          label: 'image fee',
-          modifier: cost => cost + imageFeesInfo.totalFees,
-          omit: !imageFeesInfo.totalFees
+        uploadFees: {
+          term: `+ ${numWithUnits(uploadFees.totalFees, { abbreviate: false })}`,
+          label: 'upload fee',
+          op: '+',
+          modifier: cost => cost + uploadFees.totalFees,
+          omit: !uploadFees.totalFees
         }
       })
     }
@@ -184,17 +203,17 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
     innerRef.current.focus()
   }, [mention, meta?.value, helpers?.setValue])
 
-  const imageFeesUpdate = useDebounceCallback(
+  const uploadFeesUpdate = useDebounceCallback(
     (text) => {
       const s3Keys = text ? [...text.matchAll(AWS_S3_URL_REGEXP)].map(m => Number(m[1])) : []
-      updateImageFeesInfo({ variables: { s3Keys } })
-    }, 1000, [updateImageFeesInfo])
+      updateUploadFees({ variables: { s3Keys } })
+    }, 1000, [updateUploadFees])
 
   const onChangeInner = useCallback((formik, e) => {
     if (onChange) onChange(formik, e)
     // check for mention editing
     const { value, selectionStart } = e.target
-    imageFeesUpdate(value)
+    uploadFeesUpdate(value)
 
     if (!value || selectionStart === undefined) {
       setMention(undefined)
@@ -233,7 +252,7 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
     } else {
       setMention(undefined)
     }
-  }, [onChange, setMention, imageFeesUpdate])
+  }, [onChange, setMention, uploadFeesUpdate])
 
   const onKeyDownInner = useCallback((userSuggestOnKeyDown) => {
     return (e) => {
@@ -253,6 +272,11 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
           // some browsers might use CTRL+I to do something else so prevent that behavior too
           e.preventDefault()
           insertMarkdownItalicFormatting(innerRef.current, helpers.setValue, setSelectionRange)
+        }
+        if (e.key === 'u') {
+          // some browsers might use CTRL+U to do something else so prevent that behavior too
+          e.preventDefault()
+          imageUploadRef.current?.click()
         }
         if (e.key === 'Tab' && e.altKey) {
           e.preventDefault()
@@ -321,7 +345,7 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
             <Nav.Link className={styles.previewTab} eventKey='preview' disabled={!meta.value}>preview</Nav.Link>
           </Nav.Item>
           <span className='ms-auto text-muted d-flex align-items-center'>
-            <ImageUpload
+            <FileUpload
               multiple
               ref={imageUploadRef}
               className='d-flex align-items-center me-1'
@@ -344,7 +368,7 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
                 text = text.replace(`![Uploading ${name}…]()`, `![](${url})`)
                 helpers.setValue(text)
                 const s3Keys = [...text.matchAll(AWS_S3_URL_REGEXP)].map(m => Number(m[1]))
-                updateImageFeesInfo({ variables: { s3Keys } })
+                updateUploadFees({ variables: { s3Keys } })
                 setSubmitDisabled?.(false)
               }}
               onError={({ name }) => {
@@ -354,8 +378,8 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
                 setSubmitDisabled?.(false)
               }}
             >
-              <AddImageIcon width={18} height={18} />
-            </ImageUpload>
+              <AddFileIcon width={18} height={18} />
+            </FileUpload>
             <a
               className='d-flex align-items-center'
               href='https://guides.github.com/features/mastering-markdown/' target='_blank' rel='noreferrer'
@@ -387,7 +411,7 @@ export function MarkdownInput ({ label, topLevel, groupClassName, onChange, onKe
         {tab !== 'write' &&
           <div className='form-group'>
             <div className={`${styles.text} form-control`}>
-              <Text topLevel={topLevel} noFragments tab={tab}>{meta.value}</Text>
+              <Text topLevel={topLevel} tab={tab}>{meta.value}</Text>
             </div>
           </div>}
       </div>
@@ -449,6 +473,7 @@ function InputInner ({
   const [field, meta, helpers] = noForm ? [{}, {}, {}] : useField(props)
   const formik = noForm ? null : useFormikContext()
   const storageKeyPrefix = useContext(StorageKeyPrefixContext)
+  const isClient = useIsClient()
 
   const storageKey = storageKeyPrefix ? storageKeyPrefix + '-' + props.name : undefined
 
@@ -484,6 +509,7 @@ function InputInner ({
       if (storageKey) {
         window.localStorage.setItem(storageKey, overrideValue)
       }
+      onChange && onChange(formik, { target: { value: overrideValue } })
     } else if (storageKey) {
       const draft = window.localStorage.getItem(storageKey)
       if (draft) {
@@ -532,7 +558,7 @@ function InputInner ({
           isInvalid={invalid}
           isValid={showValid && meta.initialValue !== meta.value && meta.touched && !meta.error}
         />
-        {(clear && field.value) &&
+        {(isClient && clear && field.value && !props.readOnly) &&
           <Button
             variant={null}
             onClick={(e) => {
@@ -705,10 +731,11 @@ export function InputUserSuggest ({
   )
 }
 
-export function Input ({ label, groupClassName, ...props }) {
+export function Input ({ label, groupClassName, under, ...props }) {
   return (
     <FormGroup label={label} className={groupClassName}>
       <InputInner {...props} />
+      {under}
     </FormGroup>
   )
 }
@@ -802,13 +829,13 @@ export function CheckboxGroup ({ label, groupClassName, children, ...props }) {
 const StorageKeyPrefixContext = createContext()
 
 export function Form ({
-  initial, schema, onSubmit, children, initialError, validateImmediately,
-  storageKeyPrefix, validateOnChange = true, requireSession, innerRef,
+  initial, validate, schema, onSubmit, children, initialError, validateImmediately,
+  storageKeyPrefix, validateOnChange = true, requireSession, innerRef, enableReinitialize,
   ...props
 }) {
   const toaster = useToast()
   const initialErrorToasted = useRef(false)
-  const me = useMe()
+  const { me } = useMe()
 
   useEffect(() => {
     if (initialError && !initialErrorToasted.current) {
@@ -855,7 +882,9 @@ export function Form ({
   return (
     <Formik
       initialValues={initial}
+      enableReinitialize={enableReinitialize}
       validateOnChange={validateOnChange}
+      validate={validate}
       validationSchema={schema}
       initialTouched={validateImmediately && initial}
       validateOnBlur={false}
@@ -1044,7 +1073,7 @@ function Client (Component) {
     // where the initial value is not available on first render.
     // Example: value is stored in localStorage which is fetched
     // after first render using an useEffect hook.
-    const [,, helpers] = useField(props)
+    const [,, helpers] = props.noForm ? [{}, {}, {}] : useField(props)
 
     useEffect(() => {
       initialValue && helpers.setValue(initialValue)
@@ -1062,24 +1091,133 @@ function PasswordHider ({ onClick, showPass }) {
     >
       {!showPass
         ? <Eye
-            fill='var(--bs-body-color)' height={20} width={20}
+            fill='var(--bs-body-color)' height={16} width={16}
           />
         : <EyeClose
-            fill='var(--bs-body-color)' height={20} width={20}
+            fill='var(--bs-body-color)' height={16} width={16}
           />}
     </InputGroup.Text>
   )
 }
 
-export function PasswordInput ({ newPass, ...props }) {
-  const [showPass, setShowPass] = useState(false)
+function QrPassword ({ value }) {
+  const showModal = useShowModal()
+  const toaster = useToast()
 
+  const showQr = useCallback(() => {
+    showModal(close => (
+      <div>
+        <p className='line-height-md text-muted'>Import this passphrase into another device by navigating to device sync settings and scanning this QR code</p>
+        <div className='d-block p-3 mx-auto' style={{ background: 'white', maxWidth: '300px' }}>
+          <QRCodeSVG className='h-auto mw-100' value={value} size={300} imageSettings={qrImageSettings} />
+        </div>
+      </div>
+    ))
+  }, [toaster, value, showModal])
+
+  return (
+    <>
+      <InputGroup.Text
+        style={{ cursor: 'pointer' }}
+        onClick={showQr}
+      >
+        <QrIcon height={16} width={16} />
+      </InputGroup.Text>
+    </>
+  )
+}
+
+function PasswordScanner ({ onScan, text }) {
+  const showModal = useShowModal()
+  const toaster = useToast()
+
+  return (
+    <InputGroup.Text
+      style={{ cursor: 'pointer' }}
+      onClick={() => {
+        showModal(onClose => {
+          return (
+            <div>
+              {text && <h5 className='line-height-md mb-4 text-center'>{text}</h5>}
+              <Scanner
+                formats={['qr_code']}
+                onScan={([{ rawValue: result }]) => {
+                  onScan(result)
+                  onClose()
+                }}
+                styles={{
+                  video: {
+                    aspectRatio: '1 / 1'
+                  }
+                }}
+                onError={(error) => {
+                  if (error instanceof DOMException) {
+                    console.log(error)
+                  } else {
+                    toaster.danger('qr scan: ' + error?.message || error?.toString?.())
+                  }
+                  onClose()
+                }}
+              />
+            </div>
+          )
+        })
+      }}
+    >
+      <QrScanIcon
+        height={20} width={20} fill='var(--bs-body-color)'
+      />
+    </InputGroup.Text>
+  )
+}
+
+export function PasswordInput ({ newPass, qr, copy, readOnly, append, value: initialValue, ...props }) {
+  const [showPass, setShowPass] = useState(false)
+  const [value, setValue] = useState(initialValue)
+  const [field,, helpers] = props.noForm ? [{ value }, {}, { setValue }] : useField(props)
+
+  const Append = useMemo(() => {
+    return (
+      <>
+        <PasswordHider showPass={showPass} onClick={() => setShowPass(!showPass)} />
+        {copy && (
+          <CopyButton icon value={field?.value} />
+        )}
+        {qr && (readOnly
+          ? <QrPassword value={field?.value} />
+          : <PasswordScanner
+              text="Where'd you learn to square dance?"
+              onScan={v => helpers.setValue(v)}
+            />)}
+        {append}
+      </>
+    )
+  }, [showPass, copy, field?.value, helpers.setValue, qr, readOnly, append])
+
+  const style = props.style ? { ...props.style } : {}
+  if (props.as === 'textarea') {
+    if (!showPass) {
+      style.WebkitTextSecurity = 'disc'
+    } else {
+      if (style.WebkitTextSecurity) delete style.WebkitTextSecurity
+    }
+  }
   return (
     <ClientInput
       {...props}
+      style={style}
+      className={styles.passwordInput}
       type={showPass ? 'text' : 'password'}
       autoComplete={newPass ? 'new-password' : 'current-password'}
-      append={<PasswordHider showPass={showPass} onClick={() => setShowPass(!showPass)} />}
+      readOnly={readOnly}
+      append={props.as === 'textarea' ? undefined : Append}
+      value={field?.value}
+      under={props.as === 'textarea'
+        ? (
+          <div className='mt-2 d-flex justify-content-end' style={{ gap: '8px' }}>
+            {Append}
+          </div>)
+        : undefined}
     />
   )
 }

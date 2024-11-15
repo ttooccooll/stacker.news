@@ -86,6 +86,7 @@ export const NOTIFICATIONS = gql`
           id
           sortTime
           days
+          type
         }
         ... on Earn {
           id
@@ -184,6 +185,8 @@ export const NOTIFICATIONS = gql`
           earnedSats
           withdrawl {
             autoWithdraw
+            p2p
+            satsFeePaid
           }
         }
         ... on Reminder {

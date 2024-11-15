@@ -1,20 +1,28 @@
 .fresh {
     border-radius: 0;
-    border: solid 1px var(--bs-info);
+    border: solid 1px var(--theme-note-fresh);
     border-bottom: 0;
     border-top: 0;
+    margin-left: -0.5rem;
+    padding-left: 0.5rem;
+    margin-right: -0.5rem;
+    padding-right: 0.5rem;
 }
 
 .fresh:not(.fresh ~ .fresh) {
     border-top-left-radius: .4rem;
     border-top-right-radius: .4rem;
-    border-top: solid 1px var(--bs-info);
+    border-top: solid 1px var(--theme-note-fresh);
+}
+
+.fresh:has(+ :not(.fresh)):has(+ :not(.reply)),
+.fresh:not(.reply):has(+ :not(.fresh)) {
+    border-bottom-left-radius: .4rem;
+    border-bottom-right-radius: .4rem;
 }
 
 .fresh:has(+ :not(.fresh)) {
-    border-bottom-left-radius: .4rem;
-    border-bottom-right-radius: .4rem;
-    border-bottom: solid 1px var(--bs-info);
+    border-bottom: solid 1px var(--theme-note-fresh);
 }
 
 .reply {
@@ -58,4 +66,11 @@
     background: var(--theme-clickToContextColor) !important;
     vertical-align: middle;
     margin-left: 0.5rem;
+}
+
+.noteHeader {
+    display: inline-block;
+    font-weight: 800;
+    line-height: 1.25;
+    vertical-align: middle;
 }

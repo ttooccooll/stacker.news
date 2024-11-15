@@ -1,29 +1,69 @@
 import { getGetServerSideProps } from '@/api/ssrApollo'
 import Layout from '@/components/layout'
 import styles from '@/styles/wallet.module.css'
-import { WalletCard } from '@/components/wallet-card'
-import { LightningAddressWalletCard } from './lightning-address'
-import { LNbitsCard } from './lnbits'
-import { NWCCard } from './nwc'
-import { LNDCard } from './lnd'
-import { CLNCard } from './cln'
-import { WALLETS } from '@/fragments/wallet'
-import { useQuery } from '@apollo/client'
-import PageLoading from '@/components/page-loading'
-import { LNCCard } from './lnc'
 import Link from 'next/link'
-import { Wallet as W } from '@/lib/constants'
+import { useWallets } from '@/wallets/index'
+import { useCallback, useState } from 'react'
+import { useIsClient } from '@/components/use-client'
+import WalletCard from '@/components/wallet-card'
+import { useToast } from '@/components/toast'
 
-export const getServerSideProps = getGetServerSideProps({ query: WALLETS, authRequired: true })
+export const getServerSideProps = getGetServerSideProps({ authRequired: true })
 
 export default function Wallet ({ ssrData }) {
-  const { data } = useQuery(WALLETS)
+  const { wallets, setPriorities } = useWallets()
+  const toast = useToast()
+  const isClient = useIsClient()
+  const [sourceIndex, setSourceIndex] = useState(null)
+  const [targetIndex, setTargetIndex] = useState(null)
 
-  if (!data && !ssrData) return <PageLoading />
-  const { wallets } = data || ssrData
-  const lnd = wallets.find(w => w.type === W.LND.type)
-  const lnaddr = wallets.find(w => w.type === W.LnAddr.type)
-  const cln = wallets.find(w => w.type === W.CLN.type)
+  const reorder = useCallback(async (sourceIndex, targetIndex) => {
+    const newOrder = [...wallets.filter(w => w.config?.enabled)]
+    const [source] = newOrder.splice(sourceIndex, 1)
+
+    const priorities = newOrder.slice(0, targetIndex)
+      .concat(source)
+      .concat(newOrder.slice(targetIndex))
+      .map((w, i) => ({ wallet: w, priority: i }))
+
+    await setPriorities(priorities)
+  }, [setPriorities, wallets])
+
+  const onDragStart = useCallback((i) => (e) => {
+    // e.dataTransfer.dropEffect = 'move'
+    // We can only use the DataTransfer API inside the drop event
+    // see https://html.spec.whatwg.org/multipage/dnd.html#security-risks-in-the-drag-and-drop-model
+    // e.dataTransfer.setData('text/plain', name)
+    // That's why we use React state instead
+    setSourceIndex(i)
+  }, [setSourceIndex])
+
+  const onDragEnter = useCallback((i) => (e) => {
+    setTargetIndex(i)
+  }, [setTargetIndex])
+
+  const onReorderError = useCallback((err) => {
+    console.error(err)
+    toast.danger('failed to reorder wallets')
+  }, [toast])
+
+  const onDragEnd = useCallback((e) => {
+    setSourceIndex(null)
+    setTargetIndex(null)
+
+    if (sourceIndex === targetIndex) return
+
+    reorder(sourceIndex, targetIndex).catch(onReorderError)
+  }, [sourceIndex, targetIndex, reorder, onReorderError])
+
+  const onTouchStart = useCallback((i) => (e) => {
+    if (sourceIndex !== null) {
+      reorder(sourceIndex, i).catch(onReorderError)
+      setSourceIndex(null)
+    } else {
+      setSourceIndex(i)
+    }
+  }, [sourceIndex, reorder, onReorderError])
 
   return (
     <Layout>
@@ -35,16 +75,35 @@ export default function Wallet ({ ssrData }) {
             wallet logs
           </Link>
         </div>
-        <div className={styles.walletGrid}>
-          <LightningAddressWalletCard wallet={lnaddr} />
-          <LNDCard wallet={lnd} />
-          <CLNCard wallet={cln} />
-          <LNbitsCard />
-          <NWCCard />
-          <LNCCard />
-          <WalletCard title='coming soon' badges={['probably']} />
-          <WalletCard title='coming soon' badges={['we hope']} />
-          <WalletCard title='coming soon' badges={['tm']} />
+        <div className={styles.walletGrid} onDragEnd={onDragEnd}>
+          {wallets.map((w, i) => {
+            const draggable = isClient && w.config?.enabled
+
+            return (
+              <div
+                key={w.def.name}
+                className={
+                    !draggable
+                      ? ''
+                      : (`${sourceIndex === i ? styles.drag : ''} ${draggable && targetIndex === i ? styles.drop : ''}`)
+                    }
+                suppressHydrationWarning
+              >
+                <WalletCard
+                  wallet={w}
+                  draggable={draggable}
+                  onDragStart={draggable ? onDragStart(i) : undefined}
+                  onTouchStart={draggable ? onTouchStart(i) : undefined}
+                  onDragEnter={draggable ? onDragEnter(i) : undefined}
+                  sourceIndex={sourceIndex}
+                  targetIndex={targetIndex}
+                  index={i}
+                />
+              </div>
+            )
+          }
+          )}
+
         </div>
       </div>
     </Layout>

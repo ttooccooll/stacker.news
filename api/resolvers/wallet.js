@@ -1,19 +1,84 @@
-import { getIdentity, createHodlInvoice, createInvoice, decodePaymentRequest, payViaPaymentRequest, cancelHodlInvoice, getInvoice as getInvoiceFromLnd, getNode, authenticatedLndGrpc, deletePayment, getPayment } from 'ln-service'
-import { GraphQLError } from 'graphql'
+import {
+  createHodlInvoice, createInvoice, payViaPaymentRequest,
+  getInvoice as getInvoiceFromLnd, deletePayment, getPayment,
+  parsePaymentRequest
+} from 'ln-service'
 import crypto, { timingSafeEqual } from 'crypto'
 import serialize from './serial'
 import { decodeCursor, LIMIT, nextCursorEncoded } from '@/lib/cursor'
 import { SELECT, itemQueryWithMeta } from './item'
-import { lnAddrOptions } from '@/lib/lnurl'
-import { msatsToSats, msatsToSatsDecimal, ensureB64 } from '@/lib/format'
-import { CLNAutowithdrawSchema, LNDAutowithdrawSchema, amountSchema, lnAddrAutowithdrawSchema, lnAddrSchema, ssValidate, withdrawlSchema } from '@/lib/validate'
-import { ANON_BALANCE_LIMIT_MSATS, ANON_INV_PENDING_LIMIT, USER_ID, BALANCE_LIMIT_MSATS, INVOICE_RETENTION_DAYS, INV_PENDING_LIMIT, USER_IDS_BALANCE_NO_LIMIT, Wallet } from '@/lib/constants'
+import { formatMsats, formatSats, msatsToSats, msatsToSatsDecimal } from '@/lib/format'
+import {
+  ANON_BALANCE_LIMIT_MSATS, ANON_INV_PENDING_LIMIT, USER_ID, BALANCE_LIMIT_MSATS,
+  INVOICE_RETENTION_DAYS, INV_PENDING_LIMIT, USER_IDS_BALANCE_NO_LIMIT, LND_PATHFINDING_TIMEOUT_MS
+} from '@/lib/constants'
+import { amountSchema, validateSchema, withdrawlSchema, lnAddrSchema } from '@/lib/validate'
 import { datePivot } from '@/lib/time'
 import assertGofacYourself from './ofac'
 import assertApiKeyNotPermitted from './apiKey'
-import { createInvoice as createInvoiceCLN } from '@/lib/cln'
 import { bolt11Tags } from '@/lib/bolt11'
-import { checkInvoice } from 'worker/wallet'
+import { finalizeHodlInvoice } from 'worker/wallet'
+import walletDefs from 'wallets/server'
+import { generateResolverName, generateTypeDefName } from '@/wallets/graphql'
+import { lnAddrOptions } from '@/lib/lnurl'
+import { GqlAuthenticationError, GqlAuthorizationError, GqlInputError } from '@/lib/error'
+import { getNodeSockets, getOurPubkey } from '../lnd'
+import validateWallet from '@/wallets/validate'
+import { canReceive } from '@/wallets/common'
+
+function injectResolvers (resolvers) {
+  console.group('injected GraphQL resolvers:')
+  for (const walletDef of walletDefs) {
+    const resolverName = generateResolverName(walletDef.walletField)
+    console.log(resolverName)
+    resolvers.Mutation[resolverName] = async (parent, { settings, validateLightning, vaultEntries, ...data }, { me, models }) => {
+      console.log('resolving', resolverName, { settings, validateLightning, vaultEntries, ...data })
+
+      let existingVaultEntries
+      if (typeof vaultEntries === 'undefined' && data.id) {
+        // this mutation was sent from an unsynced client
+        // to pass validation, we need to add the existing vault entries for validation
+        // in case the client is removing the receiving config
+        existingVaultEntries = await models.vaultEntry.findMany({
+          where: {
+            walletId: Number(data.id)
+          }
+        })
+      }
+
+      const validData = await validateWallet(walletDef,
+        { ...data, ...settings, vaultEntries: vaultEntries ?? existingVaultEntries },
+        { serverSide: true })
+      if (validData) {
+        data && Object.keys(validData).filter(key => key in data).forEach(key => { data[key] = validData[key] })
+        settings && Object.keys(validData).filter(key => key in settings).forEach(key => { settings[key] = validData[key] })
+      }
+
+      // wallet in shape of db row
+      const wallet = {
+        field: walletDef.walletField,
+        type: walletDef.walletType,
+        userId: me?.id
+      }
+      const logger = walletLogger({ wallet, models })
+
+      return await upsertWallet({
+        wallet,
+        testCreateInvoice:
+          walletDef.testCreateInvoice && validateLightning && canReceive({ def: walletDef, config: data })
+            ? (data) => walletDef.testCreateInvoice(data, { logger, me, models })
+            : null
+      }, {
+        settings,
+        data,
+        vaultEntries
+      }, { logger, me, models })
+    }
+  }
+  console.groupEnd()
+
+  return resolvers
+}
 
 export async function getInvoice (parent, { id }, { me, models, lnd }) {
   const inv = await models.invoice.findUnique({
@@ -26,17 +91,17 @@ export async function getInvoice (parent, { id }, { me, models, lnd }) {
   })
 
   if (!inv) {
-    throw new GraphQLError('invoice not found', { extensions: { code: 'BAD_INPUT' } })
+    throw new GqlInputError('invoice not found')
   }
 
   if (inv.user.id === USER_ID.anon) {
     return inv
   }
   if (!me) {
-    throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+    throw new GqlAuthenticationError()
   }
   if (inv.user.id !== me.id) {
-    throw new GraphQLError('not ur invoice', { extensions: { code: 'FORBIDDEN' } })
+    throw new GqlInputError('not ur invoice')
   }
 
   try {
@@ -46,7 +111,7 @@ export async function getInvoice (parent, { id }, { me, models, lnd }) {
 
   try {
     if (inv.confirmedAt) {
-      inv.confirmedPreimage = (await getInvoiceFromLnd({ id: inv.hash, lnd })).secret
+      inv.confirmedPreimage = inv.preimage ?? (await getInvoiceFromLnd({ id: inv.hash, lnd })).secret
     }
   } catch (err) {
     console.error('error fetching invoice from LND', err)
@@ -57,7 +122,7 @@ export async function getInvoice (parent, { id }, { me, models, lnd }) {
 
 export async function getWithdrawl (parent, { id }, { me, models, lnd }) {
   if (!me) {
-    throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+    throw new GqlAuthenticationError()
   }
 
   const wdrwl = await models.withdrawl.findUnique({
@@ -65,24 +130,17 @@ export async function getWithdrawl (parent, { id }, { me, models, lnd }) {
       id: Number(id)
     },
     include: {
-      user: true
+      user: true,
+      invoiceForward: true
     }
   })
 
   if (!wdrwl) {
-    throw new GraphQLError('withdrawal not found', { extensions: { code: 'BAD_INPUT' } })
+    throw new GqlInputError('withdrawal not found')
   }
 
   if (wdrwl.user.id !== me.id) {
-    throw new GraphQLError('not ur withdrawal', { extensions: { code: 'FORBIDDEN' } })
-  }
-
-  try {
-    if (wdrwl.status === 'CONFIRMED') {
-      wdrwl.preimage = (await getPayment({ id: wdrwl.hash, lnd })).payment.secret
-    }
-  } catch (err) {
-    console.error('error fetching payment from LND', err)
+    throw new GqlInputError('not ur withdrawal')
   }
 
   return wdrwl
@@ -93,49 +151,69 @@ export function createHmac (hash) {
   return crypto.createHmac('sha256', key).update(Buffer.from(hash, 'hex')).digest('hex')
 }
 
-export default {
+export function verifyHmac (hash, hmac) {
+  const hmac2 = createHmac(hash)
+  if (!timingSafeEqual(Buffer.from(hmac), Buffer.from(hmac2))) {
+    throw new GqlAuthorizationError('bad hmac')
+  }
+  return true
+}
+
+const resolvers = {
   Query: {
     invoice: getInvoice,
     wallet: async (parent, { id }, { me, models }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+        throw new GqlAuthenticationError()
       }
 
       return await models.wallet.findUnique({
         where: {
           userId: me.id,
           id: Number(id)
+        },
+        include: {
+          vaultEntries: true
         }
       })
     },
     walletByType: async (parent, { type }, { me, models }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+        throw new GqlAuthenticationError()
       }
 
       const wallet = await models.wallet.findFirst({
         where: {
           userId: me.id,
           type
+        },
+        include: {
+          vaultEntries: true
         }
       })
       return wallet
     },
     wallets: async (parent, args, { me, models }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+        throw new GqlAuthenticationError()
       }
 
       return await models.wallet.findMany({
+        include: {
+          vaultEntries: true
+        },
         where: {
           userId: me.id
+        },
+        orderBy: {
+          priority: 'asc'
         }
       })
     },
     withdrawl: getWithdrawl,
     numBolt11s: async (parent, args, { me, models, lnd }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+        throw new GqlAuthenticationError()
       }
 
       return await models.withdrawl.count({
@@ -151,7 +229,7 @@ export default {
     walletHistory: async (parent, { cursor, inc }, { me, models, lnd }) => {
       const decodedCursor = decodeCursor(cursor)
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+        throw new GqlAuthenticationError()
       }
 
       const include = new Set(inc?.split(','))
@@ -165,8 +243,8 @@ export default {
               jsonb_build_object(
                 'bolt11', bolt11,
                 'status', CASE WHEN "confirmedAt" IS NOT NULL THEN 'CONFIRMED'
-                              WHEN "expiresAt" <= $2 THEN 'EXPIRED'
                               WHEN cancelled THEN 'CANCELLED'
+                              WHEN "expiresAt" <= $2 AND NOT "isHeld" THEN 'EXPIRED'
                               ELSE 'PENDING' END,
                 'description', "desc",
                 'invoiceComment', comment,
@@ -180,17 +258,19 @@ export default {
       if (include.has('withdrawal')) {
         queries.push(
           `(SELECT
-              id, created_at as "createdAt",
+              "Withdrawl".id, "Withdrawl".created_at as "createdAt",
               COALESCE("msatsPaid", "msatsPaying") as msats,
-              'withdrawal' as type,
+              CASE WHEN bool_and("InvoiceForward".id IS NULL) THEN 'withdrawal' ELSE 'p2p' END as type,
               jsonb_build_object(
-                'bolt11', bolt11,
+                'bolt11', "Withdrawl".bolt11,
                 'autoWithdraw', "autoWithdraw",
                 'status', COALESCE(status::text, 'PENDING'),
                 'msatsFee', COALESCE("msatsFeePaid", "msatsFeePaying")) as other
             FROM "Withdrawl"
-            WHERE "userId" = $1
-            AND created_at <= $2)`
+            LEFT JOIN "InvoiceForward" ON "Withdrawl".id = "InvoiceForward"."withdrawlId"
+            WHERE "Withdrawl"."userId" = $1
+            AND "Withdrawl".created_at <= $2
+            GROUP BY "Withdrawl".id)`
         )
       }
 
@@ -292,6 +372,9 @@ export default {
           case 'withdrawal':
             f.msats = (-1 * Number(f.msats)) - Number(f.msatsFee)
             break
+          case 'p2p':
+            f.msats = -1 * Number(f.msats)
+            break
           case 'spent':
           case 'donation':
           case 'billing':
@@ -309,29 +392,74 @@ export default {
         facts: history
       }
     },
-    walletLogs: async (parent, args, { me, models }) => {
+    walletLogs: async (parent, { type, from, to, cursor }, { me, models }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+        throw new GqlAuthenticationError()
       }
 
-      return await models.walletLog.findMany({
-        where: {
-          userId: me.id
-        },
-        orderBy: {
-          createdAt: 'asc'
-        }
-      })
+      // we cursoring with the wallet logs on the client
+      // if we have from, don't use cursor
+      // regardless, store the state of the cursor for the next call
+
+      const decodedCursor = cursor ? decodeCursor(cursor) : { offset: 0, time: to ?? new Date() }
+
+      let logs = []
+      let nextCursor
+      if (from) {
+        logs = await models.walletLog.findMany({
+          where: {
+            userId: me.id,
+            wallet: type ?? undefined,
+            createdAt: {
+              gt: from ? new Date(Number(from)) : undefined,
+              lte: to ? new Date(Number(to)) : undefined
+            }
+          },
+          orderBy: [
+            { createdAt: 'desc' },
+            { id: 'desc' }
+          ]
+        })
+        nextCursor = nextCursorEncoded(decodedCursor, logs.length)
+      } else {
+        logs = await models.walletLog.findMany({
+          where: {
+            userId: me.id,
+            wallet: type ?? undefined,
+            createdAt: {
+              lte: decodedCursor.time
+            }
+          },
+          orderBy: [
+            { createdAt: 'desc' },
+            { id: 'desc' }
+          ],
+          take: LIMIT,
+          skip: decodedCursor.offset
+        })
+        nextCursor = logs.length === LIMIT ? nextCursorEncoded(decodedCursor, logs.length) : null
+      }
+
+      return {
+        cursor: nextCursor,
+        entries: logs
+      }
+    }
+  },
+  Wallet: {
+    wallet: async (wallet) => {
+      return {
+        ...wallet.wallet,
+        __resolveType: generateTypeDefName(wallet.type)
+      }
     }
   },
   WalletDetails: {
-    __resolveType (wallet) {
-      return wallet.address ? 'WalletLNAddr' : wallet.macaroon ? 'WalletLND' : 'WalletCLN'
-    }
+    __resolveType: wallet => wallet.__resolveType
   },
   Mutation: {
     createInvoice: async (parent, { amount, hodlInvoice = false, expireSecs = 3600 }, { me, models, lnd, headers }) => {
-      await ssValidate(amountSchema, { amount })
+      await validateSchema(amountSchema, { amount })
       await assertGofacYourself({ models, headers })
 
       let expirePivot = { seconds: expireSecs }
@@ -358,7 +486,7 @@ export default {
         })
 
         const [inv] = await serialize(
-          models.$queryRaw`SELECT * FROM create_invoice(${invoice.id}, ${hodlInvoice ? invoice.secret : null}::TEXT, ${invoice.request},
+          models.$queryRaw`SELECT * FROM create_invoice(${invoice.id}, ${invoice.secret}::TEXT, ${invoice.request},
             ${expiresAt}::timestamp, ${amount * 1000}, ${user.id}::INTEGER, ${description}, NULL, NULL,
             ${invLimit}::INTEGER, ${balanceLimit})`,
           { models }
@@ -377,19 +505,22 @@ export default {
     },
     createWithdrawl: createWithdrawal,
     sendToLnAddr,
-    cancelInvoice: async (parent, { hash, hmac }, { models, lnd }) => {
-      const hmac2 = createHmac(hash)
-      if (!timingSafeEqual(Buffer.from(hmac), Buffer.from(hmac2))) {
-        throw new GraphQLError('bad hmac', { extensions: { code: 'FORBIDDEN' } })
+    cancelInvoice: async (parent, { hash, hmac }, { models, lnd, boss }) => {
+      verifyHmac(hash, hmac)
+      const dbInv = await finalizeHodlInvoice({ data: { hash }, lnd, models, boss })
+
+      if (dbInv?.invoiceForward) {
+        const { wallet, bolt11 } = dbInv.invoiceForward
+        const logger = walletLogger({ wallet, models })
+        const decoded = await parsePaymentRequest({ request: bolt11 })
+        logger.info(`invoice for ${formatSats(msatsToSats(decoded.mtokens))} canceled by payer`, { bolt11 })
       }
-      await cancelHodlInvoice({ id: hash, lnd })
-      // transition invoice to cancelled action state
-      await checkInvoice({ data: { hash }, models, lnd })
+
       return await models.invoice.findFirst({ where: { hash } })
     },
     dropBolt11: async (parent, { id }, { me, models, lnd }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'UNAUTHENTICATED' } })
+        throw new GqlAuthenticationError()
       }
 
       const retention = `${INVOICE_RETENTION_DAYS} days`
@@ -400,11 +531,12 @@ export default {
         FROM "Withdrawl"
         WHERE "userId" = ${me.id}
         AND id = ${Number(id)}
-        AND now() > created_at + interval '${retention}'
+        AND now() > created_at + ${retention}::INTERVAL
         AND hash IS NOT NULL
+        AND status IS NOT NULL
       ), updated_rows AS (
         UPDATE "Withdrawl"
-        SET hash = NULL, bolt11 = NULL
+        SET hash = NULL, bolt11 = NULL, preimage = NULL
         FROM to_be_updated
         WHERE "Withdrawl".id = to_be_updated.id)
       SELECT * FROM to_be_updated;`
@@ -416,112 +548,41 @@ export default {
           console.error(error)
           await models.withdrawl.update({
             where: { id: invoice.id },
-            data: { hash: invoice.hash, bolt11: invoice.bolt11 }
+            data: { hash: invoice.hash, bolt11: invoice.bolt11, preimage: invoice.preimage }
           })
-          throw new GraphQLError('failed to drop bolt11 from lnd', { extensions: { code: 'BAD_INPUT' } })
+          throw new GqlInputError('failed to drop bolt11 from lnd')
         }
       }
       return { id }
     },
-    upsertWalletLND: async (parent, { settings, ...data }, { me, models }) => {
-      // make sure inputs are base64
-      data.macaroon = ensureB64(data.macaroon)
-      data.cert = ensureB64(data.cert)
+    setWalletPriority: async (parent, { id, priority }, { me, models }) => {
+      if (!me) {
+        throw new GqlAuthenticationError()
+      }
 
-      const wallet = Wallet.LND
-      return await upsertWallet(
-        {
-          schema: LNDAutowithdrawSchema,
-          wallet,
-          testConnect: async ({ cert, macaroon, socket }) => {
-            try {
-              const { lnd } = await authenticatedLndGrpc({
-                cert,
-                macaroon,
-                socket
-              })
-              const inv = await createInvoice({
-                description: 'SN connection test',
-                lnd,
-                tokens: 0,
-                expires_at: new Date()
-              })
-              // we wrap both calls in one try/catch since connection attempts happen on RPC calls
-              await addWalletLog({ wallet, level: 'SUCCESS', message: 'connected to LND' }, { me, models })
-              return inv
-            } catch (err) {
-              // LND errors are in this shape: [code, type, { err: { code, details, metadata } }]
-              const details = err[2]?.err?.details || err.message || err.toString?.()
-              await addWalletLog({ wallet, level: 'ERROR', message: `could not connect to LND: ${details}` }, { me, models })
-              throw err
-            }
-          }
-        },
-        { settings, data }, { me, models })
-    },
-    upsertWalletCLN: async (parent, { settings, ...data }, { me, models }) => {
-      data.cert = ensureB64(data.cert)
+      await models.wallet.update({ where: { userId: me.id, id: Number(id) }, data: { priority } })
 
-      const wallet = Wallet.CLN
-      return await upsertWallet(
-        {
-          schema: CLNAutowithdrawSchema,
-          wallet,
-          testConnect: async ({ socket, rune, cert }) => {
-            try {
-              const inv = await createInvoiceCLN({
-                socket,
-                rune,
-                cert,
-                description: 'SN connection test',
-                msats: 'any',
-                expiry: 0
-              })
-              await addWalletLog({ wallet, level: 'SUCCESS', message: 'connected to CLN' }, { me, models })
-              return inv
-            } catch (err) {
-              const details = err.details || err.message || err.toString?.()
-              await addWalletLog({ wallet, level: 'ERROR', message: `could not connect to CLN: ${details}` }, { me, models })
-              throw err
-            }
-          }
-        },
-        { settings, data }, { me, models })
-    },
-    upsertWalletLNAddr: async (parent, { settings, ...data }, { me, models }) => {
-      const wallet = Wallet.LnAddr
-      return await upsertWallet(
-        {
-          schema: lnAddrAutowithdrawSchema,
-          wallet,
-          testConnect: async ({ address }) => {
-            const options = await lnAddrOptions(address)
-            await addWalletLog({ wallet, level: 'SUCCESS', message: 'fetched payment details' }, { me, models })
-            return options
-          }
-        },
-        { settings, data }, { me, models })
+      return true
     },
     removeWallet: async (parent, { id }, { me, models }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'UNAUTHENTICATED' } })
+        throw new GqlAuthenticationError()
       }
 
       const wallet = await models.wallet.findUnique({ where: { userId: me.id, id: Number(id) } })
       if (!wallet) {
-        throw new GraphQLError('wallet not found', { extensions: { code: 'BAD_INPUT' } })
+        throw new GqlInputError('wallet not found')
       }
 
-      await models.$transaction([
-        models.wallet.delete({ where: { userId: me.id, id: Number(id) } }),
-        models.walletLog.create({ data: { userId: me.id, wallet: wallet.type, level: 'SUCCESS', message: 'wallet deleted' } })
-      ])
+      const logger = walletLogger({ wallet, models })
+      await models.wallet.delete({ where: { userId: me.id, id: Number(id) } })
+      logger.info('wallet detached')
 
       return true
     },
     deleteWalletLogs: async (parent, { wallet }, { me, models }) => {
       if (!me) {
-        throw new GraphQLError('you must be logged in', { extensions: { code: 'UNAUTHENTICATED' } })
+        throw new GqlAuthenticationError()
       }
 
       await models.walletLog.deleteMany({ where: { userId: me.id, wallet } })
@@ -533,8 +594,18 @@ export default {
   Withdrawl: {
     satsPaying: w => msatsToSats(w.msatsPaying),
     satsPaid: w => msatsToSats(w.msatsPaid),
-    satsFeePaying: w => msatsToSats(w.msatsFeePaying),
-    satsFeePaid: w => msatsToSats(w.msatsFeePaid)
+    satsFeePaying: w => w.invoiceForward?.length > 0 ? 0 : msatsToSats(w.msatsFeePaying),
+    satsFeePaid: w => w.invoiceForward?.length > 0 ? 0 : msatsToSats(w.msatsFeePaid),
+    p2p: w => !!w.invoiceForward?.length,
+    preimage: async (withdrawl, args, { lnd }) => {
+      try {
+        if (withdrawl.status === 'CONFIRMED') {
+          return withdrawl.preimage ?? (await getPayment({ id: withdrawl.hash, lnd })).payment.secret
+        }
+      } catch (err) {
+        console.error('error fetching payment from LND', err)
+      }
+    }
   },
 
   Invoice: {
@@ -547,6 +618,7 @@ export default {
         case 'ZAP':
         case 'DOWN_ZAP':
         case 'POLL_VOTE':
+        case 'BOOST':
           return (await itemQueryWithMeta({
             me,
             models,
@@ -563,12 +635,14 @@ export default {
       const action2act = {
         ZAP: 'TIP',
         DOWN_ZAP: 'DONT_LIKE_THIS',
-        POLL_VOTE: 'POLL'
+        POLL_VOTE: 'POLL',
+        BOOST: 'BOOST'
       }
       switch (invoice.actionType) {
         case 'ZAP':
         case 'DOWN_ZAP':
         case 'POLL_VOTE':
+        case 'BOOST':
           return (await models.$queryRaw`
               SELECT id, act, "invoiceId", "invoiceActionState", msats
               FROM "ItemAct"
@@ -598,138 +672,235 @@ export default {
   }
 }
 
-export const addWalletLog = async ({ wallet, level, message }, { me, models }) => {
-  try {
-    await models.walletLog.create({ data: { userId: me.id, wallet: wallet.type, level, message } })
-  } catch (err) {
-    console.error('error creating wallet log:', err)
+export default injectResolvers(resolvers)
+
+export const walletLogger = ({ wallet, models }) => {
+  // no-op logger if wallet is not provided
+  if (!wallet) {
+    return {
+      ok: () => {},
+      info: () => {},
+      error: () => {},
+      warn: () => {}
+    }
+  }
+
+  // server implementation of wallet logger interface on client
+  const log = (level) => async (message, context = {}) => {
+    try {
+      if (context?.bolt11) {
+        // automatically populate context from bolt11 to avoid duplicating this code
+        const decoded = await parsePaymentRequest({ request: context.bolt11 })
+        context = {
+          ...context,
+          amount: formatMsats(decoded.mtokens),
+          payment_hash: decoded.id,
+          created_at: decoded.created_at,
+          expires_at: decoded.expires_at,
+          description: decoded.description
+        }
+      }
+
+      await models.walletLog.create({
+        data: {
+          userId: wallet.userId,
+          wallet: wallet.type,
+          level,
+          message,
+          context
+        }
+      })
+    } catch (err) {
+      console.error('error creating wallet log:', err)
+    }
+  }
+
+  return {
+    ok: (message, context) => log('SUCCESS')(message, context),
+    info: (message, context) => log('INFO')(message, context),
+    error: (message, context) => log('ERROR')(message, context),
+    warn: (message, context) => log('WARN')(message, context)
   }
 }
 
 async function upsertWallet (
-  { schema, wallet, testConnect }, { settings, data }, { me, models }) {
+  { wallet, testCreateInvoice }, { settings, data, vaultEntries }, { logger, me, models }) {
   if (!me) {
-    throw new GraphQLError('you must be logged in', { extensions: { code: 'UNAUTHENTICATED' } })
+    throw new GqlAuthenticationError()
   }
   assertApiKeyNotPermitted({ me })
 
-  await ssValidate(schema, { ...data, ...settings }, { me, models })
-
-  if (testConnect) {
+  if (testCreateInvoice) {
     try {
-      await testConnect(data)
+      await testCreateInvoice(data)
     } catch (err) {
-      console.error(err)
-      await addWalletLog({ wallet, level: 'ERROR', message: 'failed to attach wallet' }, { me, models })
-      throw new GraphQLError('failed to connect to wallet', { extensions: { code: 'BAD_INPUT' } })
+      const message = 'failed to create test invoice: ' + (err.message || err.toString?.())
+      logger.error(message)
+      throw new GqlInputError(message)
     }
   }
 
-  const { id, ...walletData } = data
-  const { autoWithdrawThreshold, autoWithdrawMaxFeePercent, priority } = settings
+  const { id, enabled, priority, ...walletData } = data
 
-  const txs = [
-    models.user.update({
-      where: { id: me.id },
-      data: {
-        autoWithdrawMaxFeePercent,
-        autoWithdrawThreshold
-      }
-    })
-  ]
-
-  if (priority) {
-    txs.push(
-      models.wallet.updateMany({
-        where: {
-          userId: me.id
-        },
-        data: {
-          priority: 0
-        }
-      }))
-  }
+  const txs = []
 
   if (id) {
+    const oldVaultEntries = await models.vaultEntry.findMany({ where: { userId: me.id, walletId: Number(id) } })
+
+    // createMany is the set difference of the new - old
+    // deleteMany is the set difference of the old - new
+    // updateMany is the intersection of the old and new
+    const difference = (a = [], b = [], key = 'key') => a.filter(x => !b.find(y => y[key] === x[key]))
+    const intersectionMerge = (a = [], b = [], key = 'key') => a.filter(x => b.find(y => y[key] === x[key]))
+      .map(x => ({ [key]: x[key], ...b.find(y => y[key] === x[key]) }))
+
     txs.push(
       models.wallet.update({
         where: { id: Number(id), userId: me.id },
         data: {
-          priority: priority ? 1 : 0,
-          [wallet.field]: {
-            update: {
-              where: { walletId: Number(id) },
-              data: walletData
-            }
-          }
+          enabled,
+          priority,
+          // client only wallets has no walletData
+          ...(Object.keys(walletData).length > 0
+            ? {
+                [wallet.field]: {
+                  update: {
+                    where: { walletId: Number(id) },
+                    data: walletData
+                  }
+                }
+              }
+            : {}),
+          ...(vaultEntries
+            ? {
+                vaultEntries: {
+                  deleteMany: difference(oldVaultEntries, vaultEntries, 'key').map(({ key }) => ({
+                    userId: me.id, key
+                  })),
+                  create: difference(vaultEntries, oldVaultEntries, 'key').map(({ key, iv, value }) => ({
+                    key, iv, value, userId: me.id
+                  })),
+                  update: intersectionMerge(oldVaultEntries, vaultEntries, 'key').map(({ key, iv, value }) => ({
+                    where: { userId_key: { userId: me.id, key } },
+                    data: { value, iv }
+                  }))
+                }
+              }
+            : {})
+
+        },
+        include: {
+          vaultEntries: true
         }
-      }),
-      models.walletLog.create({ data: { userId: me.id, wallet: wallet.type, level: 'SUCCESS', message: 'wallet updated' } })
+      })
     )
   } else {
     txs.push(
       models.wallet.create({
+        include: {
+          vaultEntries: true
+        },
         data: {
-          priority: Number(priority),
+          enabled,
+          priority,
           userId: me.id,
           type: wallet.type,
-          [wallet.field]: {
-            create: walletData
-          }
+          // client only wallets has no walletData
+          ...(Object.keys(walletData).length > 0 ? { [wallet.field]: { create: walletData } } : {}),
+          ...(vaultEntries
+            ? {
+                vaultEntries: {
+                  createMany: {
+                    data: vaultEntries?.map(({ key, iv, value }) => ({ key, iv, value, userId: me.id }))
+                  }
+                }
+              }
+            : {})
         }
-      }),
-      models.walletLog.create({ data: { userId: me.id, wallet: wallet.type, level: 'SUCCESS', message: 'wallet created' } })
+      })
     )
   }
 
-  await models.$transaction(txs)
-  return true
+  if (settings) {
+    txs.push(
+      models.user.update({
+        where: { id: me.id },
+        data: settings
+      })
+    )
+  }
+
+  txs.push(
+    models.walletLog.createMany({
+      data: {
+        userId: me.id,
+        wallet: wallet.type,
+        level: 'SUCCESS',
+        message: id ? 'wallet details updated' : 'wallet attached'
+      }
+    }),
+    models.walletLog.create({
+      data: {
+        userId: me.id,
+        wallet: wallet.type,
+        level: enabled ? 'SUCCESS' : 'INFO',
+        message: enabled ? 'wallet enabled' : 'wallet disabled'
+      }
+    })
+  )
+
+  const [upsertedWallet] = await models.$transaction(txs)
+  return upsertedWallet
 }
 
-export async function createWithdrawal (parent, { invoice, maxFee }, { me, models, lnd, headers, walletId = null }) {
+export async function createWithdrawal (parent, { invoice, maxFee }, { me, models, lnd, headers, wallet, logger }) {
   assertApiKeyNotPermitted({ me })
-  await ssValidate(withdrawlSchema, { invoice, maxFee })
+  await validateSchema(withdrawlSchema, { invoice, maxFee })
   await assertGofacYourself({ models, headers })
 
   // remove 'lightning:' prefix if present
   invoice = invoice.replace(/^lightning:/, '')
 
   // decode invoice to get amount
-  let decoded, node
+  let decoded, sockets
   try {
-    decoded = await decodePaymentRequest({ lnd, request: invoice })
+    decoded = await parsePaymentRequest({ request: invoice })
   } catch (error) {
     console.log(error)
-    throw new GraphQLError('could not decode invoice', { extensions: { code: 'BAD_INPUT' } })
+    throw new GqlInputError('could not decode invoice')
   }
 
   try {
-    node = await getNode({ lnd, public_key: decoded.destination, is_omitting_channels: true })
+    sockets = await getNodeSockets({ lnd, public_key: decoded.destination })
   } catch (error) {
     // likely not found if it's an unannounced channel, e.g. phoenix
     console.log(error)
   }
 
-  if (node) {
-    for (const { socket } of node.sockets) {
+  if (sockets) {
+    for (const { socket } of sockets) {
       const ip = socket.split(':')[0]
       await assertGofacYourself({ models, headers, ip })
     }
   }
 
   if (!decoded.mtokens || BigInt(decoded.mtokens) <= 0) {
-    throw new GraphQLError('your invoice must specify an amount', { extensions: { code: 'BAD_INPUT' } })
+    throw new GqlInputError('invoice must specify an amount')
+  }
+
+  if (decoded.mtokens > Number.MAX_SAFE_INTEGER) {
+    throw new GqlInputError('invoice amount is too large')
   }
 
   const msatsFee = Number(maxFee) * 1000
 
   const user = await models.user.findUnique({ where: { id: me.id } })
 
-  const autoWithdraw = !!walletId
+  const autoWithdraw = !!wallet?.id
   // create withdrawl transactionally (id, bolt11, amount, fee)
   const [withdrawl] = await serialize(
     models.$queryRaw`SELECT * FROM create_withdrawl(${decoded.id}, ${invoice},
-      ${Number(decoded.mtokens)}, ${msatsFee}, ${user.name}, ${autoWithdraw}, ${walletId}::INTEGER)`,
+      ${Number(decoded.mtokens)}, ${msatsFee}, ${user.name}, ${autoWithdraw}, ${wallet?.id}::INTEGER)`,
     { models }
   )
 
@@ -738,21 +909,37 @@ export async function createWithdrawal (parent, { invoice, maxFee }, { me, model
     request: invoice,
     // can't use max_fee_mtokens https://github.com/alexbosworth/ln-service/issues/141
     max_fee: Number(maxFee),
-    pathfinding_timeout: 30000
+    pathfinding_timeout: LND_PATHFINDING_TIMEOUT_MS
   }).catch(console.error)
 
   return withdrawl
 }
 
 export async function sendToLnAddr (parent, { addr, amount, maxFee, comment, ...payer },
-  { me, models, lnd, headers, walletId }) {
+  { me, models, lnd, headers }) {
   if (!me) {
-    throw new GraphQLError('you must be logged in', { extensions: { code: 'FORBIDDEN' } })
+    throw new GqlAuthenticationError()
   }
   assertApiKeyNotPermitted({ me })
 
+  const res = await fetchLnAddrInvoice({ addr, amount, maxFee, comment, ...payer },
+    {
+      me,
+      models,
+      lnd
+    })
+
+  // take pr and createWithdrawl
+  return await createWithdrawal(parent, { invoice: res.pr, maxFee }, { me, models, lnd, headers })
+}
+
+export async function fetchLnAddrInvoice (
+  { addr, amount, maxFee, comment, ...payer },
+  {
+    me, models, lnd, autoWithdraw = false
+  }) {
   const options = await lnAddrOptions(addr)
-  await ssValidate(lnAddrSchema, { addr, amount, maxFee, comment, ...payer }, options)
+  await validateSchema(lnAddrSchema, { addr, amount, maxFee, comment, ...payer }, options)
 
   if (payer) {
     payer = {
@@ -786,12 +973,12 @@ export async function sendToLnAddr (parent, { addr, amount, maxFee, comment, ...
 
   // decode invoice
   try {
-    const decoded = await decodePaymentRequest({ lnd, request: res.pr })
-    const ourPubkey = (await getIdentity({ lnd })).public_key
-    if (walletId && decoded.destination === ourPubkey && process.env.NODE_ENV === 'production') {
+    const decoded = await parsePaymentRequest({ request: res.pr })
+    const ourPubkey = await getOurPubkey({ lnd })
+    if (autoWithdraw && decoded.destination === ourPubkey && process.env.NODE_ENV === 'production') {
       // unset lnaddr so we don't trigger another withdrawal with same destination
       await models.wallet.deleteMany({
-        where: { userId: me.id, type: Wallet.LnAddr.type }
+        where: { userId: me.id, type: 'LIGHTNING_ADDRESS' }
       })
       throw new Error('automated withdrawals to other stackers are not allowed')
     }
@@ -803,6 +990,5 @@ export async function sendToLnAddr (parent, { addr, amount, maxFee, comment, ...
     throw e
   }
 
-  // take pr and createWithdrawl
-  return await createWithdrawal(parent, { invoice: res.pr, maxFee }, { me, models, lnd, headers, walletId })
+  return res
 }

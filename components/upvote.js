@@ -12,9 +12,10 @@ import Popover from 'react-bootstrap/Popover'
 import { useShowModal } from './modal'
 import { numWithUnits } from '@/lib/format'
 import { Dropdown } from 'react-bootstrap'
+import classNames from 'classnames'
 
 const UpvotePopover = ({ target, show, handleClose }) => {
-  const me = useMe()
+  const { me } = useMe()
   return (
     <Overlay
       show={show}
@@ -26,7 +27,7 @@ const UpvotePopover = ({ target, show, handleClose }) => {
           <button type='button' className='btn-close' onClick={handleClose}><span className='visually-hidden-focusable'>Close alert</span></button>
         </Popover.Header>
         <Popover.Body>
-          <div className='mb-2'>Press the bolt again to zap {me?.privates?.tipDefault || 1} more sat{me?.privates?.tipDefault > 1 ? 's' : ''}.</div>
+          <div className='mb-2'>Press the bolt again to zap {me?.privates?.tipRandom ? 'a random amount of' : `${me?.privates?.tipDefault || 1} more`} sat{me?.privates?.tipDefault > 1 ? 's' : ''}.</div>
           <div>Repeatedly press the bolt to zap more sats.</div>
         </Popover.Body>
       </Popover>
@@ -67,20 +68,39 @@ export function DropdownItemUpVote ({ item }) {
   )
 }
 
-export const nextTip = (meSats, { tipDefault, turboTipping }) => {
-  // what should our next tip be?
-  if (!turboTipping) return (tipDefault || 1)
+export const defaultTipIncludingRandom = ({ tipDefault, tipRandom, tipRandomMin, tipRandomMax } = {}) => {
+  return tipRandom
+    ? Math.floor((Math.random() * (tipRandomMax - tipRandomMin + 1)) + tipRandomMin)
+    : (tipDefault || 100)
+}
 
-  let sats = tipDefault || 1
+export const nextTip = (meSats, { tipDefault, turboTipping, tipRandom, tipRandomMin, tipRandomMax }) => {
   if (turboTipping) {
+    if (tipRandom) {
+      let pow = 0
+      // find the first power of 10 that is greater than meSats
+      while (!(meSats <= tipRandomMax * 10 ** pow)) {
+        pow++
+      }
+      // if meSats is in that power of 10's range already, move into the next range
+      if (meSats >= tipRandomMin * 10 ** pow) {
+        pow++
+      }
+      // make sure the our range minimum doesn't overlap with the previous range maximum
+      tipRandomMin = tipRandomMax * 10 ** (pow - 1) >= tipRandomMin * 10 ** pow ? tipRandomMax * 10 ** (pow - 1) + 1 : tipRandomMin * 10 ** pow
+      tipRandomMax = tipRandomMax * 10 ** pow
+      return Math.floor((Math.random() * (tipRandomMax - tipRandomMin + 1)) + tipRandomMin) - meSats
+    }
+
+    let sats = defaultTipIncludingRandom({ tipDefault, tipRandom, tipRandomMin, tipRandomMax })
     while (meSats >= sats) {
       sats *= 10
     }
     // deduct current sats since turbo tipping is about total zap not making the next zap 10x
-    sats -= meSats
+    return sats - meSats
   }
 
-  return sats
+  return defaultTipIncludingRandom({ tipDefault, tipRandom, tipRandomMin, tipRandomMax })
 }
 
 export default function UpVote ({ item, className }) {
@@ -88,7 +108,7 @@ export default function UpVote ({ item, className }) {
   const [voteShow, _setVoteShow] = useState(false)
   const [tipShow, _setTipShow] = useState(false)
   const ref = useRef()
-  const me = useMe()
+  const { me } = useMe()
   const [hover, setHover] = useState(false)
   const [setWalkthrough] = useMutation(
     gql`
@@ -98,7 +118,7 @@ export default function UpVote ({ item, className }) {
   )
 
   const [controller, setController] = useState(null)
-  const [pending, setPending] = useState(false)
+  const [pending, setPending] = useState(0)
 
   const setVoteShow = useCallback((yes) => {
     if (!me) return
@@ -134,15 +154,23 @@ export default function UpVote ({ item, className }) {
     [item?.mine, item?.meForward, item?.deletedAt])
 
   const [meSats, overlayText, color, nextColor] = useMemo(() => {
-    const meSats = (item?.meSats || item?.meAnonSats || 0)
+    const meSats = (me ? item?.meSats : item?.meAnonSats) || 0
 
     // what should our next tip be?
-    const sats = nextTip(meSats, { ...me?.privates })
+    const sats = pending || nextTip(meSats, { ...me?.privates })
+    let overlayTextContent
+    if (me) {
+      overlayTextContent = me.privates?.tipRandom ? 'random' : numWithUnits(sats, { abbreviate: false })
+    } else {
+      overlayTextContent = 'zap it'
+    }
 
     return [
-      meSats, me ? numWithUnits(sats, { abbreviate: false }) : 'zap it',
+      meSats, overlayTextContent,
       getColor(meSats), getColor(meSats + sats)]
-  }, [item?.meSats, item?.meAnonSats, me?.privates?.tipDefault, me?.privates?.turboDefault])
+  }, [
+    me, item?.meSats, item?.meAnonSats, me?.privates?.tipDefault, me?.privates?.turboDefault,
+    me?.privates?.tipRandom, me?.privates?.tipRandomMin, me?.privates?.tipRandomMax, pending])
 
   const handleModalClosed = () => {
     setHover(false)
@@ -163,7 +191,7 @@ export default function UpVote ({ item, className }) {
       setController(null)
       return
     }
-    const c = new ZapUndoController({ onStart: () => setPending(true), onDone: () => setPending(false) })
+    const c = new ZapUndoController({ onStart: (sats) => setPending(sats), onDone: () => setPending(0) })
     setController(c)
 
     showModal(onClose =>
@@ -190,7 +218,7 @@ export default function UpVote ({ item, className }) {
         setController(null)
         return
       }
-      const c = new ZapUndoController({ onStart: () => setPending(true), onDone: () => setPending(false) })
+      const c = new ZapUndoController({ onStart: (sats) => setPending(sats), onDone: () => setPending(0) })
       setController(c)
 
       await zap({ item, me, abortSignal: c.signal })
@@ -199,7 +227,15 @@ export default function UpVote ({ item, className }) {
     }
   }
 
-  const fillColor = hover || pending ? nextColor : color
+  const style = useMemo(() => {
+    const fillColor = pending || hover ? nextColor : color
+    return meSats || hover || pending
+      ? {
+          fill: fillColor,
+          filter: `drop-shadow(0 0 6px ${fillColor}90)`
+        }
+      : undefined
+  }, [hover, pending, nextColor, color, meSats])
 
   return (
     <div ref={ref} className='upvoteParent'>
@@ -209,7 +245,7 @@ export default function UpVote ({ item, className }) {
       >
         <ActionTooltip notForm disable={disabled} overlayText={overlayText}>
           <div
-            className={`${disabled ? styles.noSelfTips : ''} ${styles.upvoteWrapper}`}
+            className={classNames(disabled && styles.noSelfTips, styles.upvoteWrapper)}
           >
             <UpBolt
               onPointerEnter={() => setHover(true)}
@@ -217,19 +253,12 @@ export default function UpVote ({ item, className }) {
               onTouchEnd={() => setHover(false)}
               width={26}
               height={26}
-              className={
-                      `${styles.upvote}
-                      ${className || ''}
-                      ${disabled ? styles.noSelfTips : ''}
-                      ${meSats ? styles.voted : ''}
-                      ${pending ? styles.pending : ''}`
-                    }
-              style={meSats || hover || pending
-                ? {
-                    fill: fillColor,
-                    filter: `drop-shadow(0 0 6px ${fillColor}90)`
-                  }
-                : undefined}
+              className={classNames(styles.upvote,
+                className,
+                disabled && styles.noSelfTips,
+                meSats && styles.voted,
+                pending && styles.pending)}
+              style={style}
             />
           </div>
         </ActionTooltip>

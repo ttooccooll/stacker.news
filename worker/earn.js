@@ -1,13 +1,13 @@
-import { notifyEarner } from '@/lib/webPush.js'
-import { PrismaClient } from '@prisma/client'
-import { proportions } from '@/lib/madness.js'
-import { SN_NO_REWARDS_IDS } from '@/lib/constants.js'
+import { notifyEarner } from '@/lib/webPush'
+import createPrisma from '@/lib/create-prisma'
+import { proportions } from '@/lib/madness'
+import { SN_NO_REWARDS_IDS } from '@/lib/constants'
 
 const TOTAL_UPPER_BOUND_MSATS = 1_000_000_000
 
 export async function earn ({ name }) {
   // grab a greedy connection
-  const models = new PrismaClient()
+  const models = createPrisma({ connectionParams: { connection_limit: 1 } })
 
   try {
     // compute how much sn earned yesterday

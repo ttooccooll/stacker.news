@@ -1,7 +1,8 @@
 import { useCallback } from 'react'
 import { useToast } from './toast'
 import { Button } from 'react-bootstrap'
-import { DEFAULT_CROSSPOSTING_RELAYS, crosspost, callWithTimeout } from '@/lib/nostr'
+import { DEFAULT_CROSSPOSTING_RELAYS, crosspost } from '@/lib/nostr'
+import { callWithTimeout } from '@/lib/time'
 import { gql, useMutation, useQuery, useLazyQuery } from '@apollo/client'
 import { SETTINGS } from '@/fragments/users'
 import { ITEM_FULL_FIELDS, POLL_FIELDS } from '@/fragments/items'
@@ -119,7 +120,7 @@ export default function useCrossposter () {
         removeToast()
       }
 
-      const removeToast = toaster.danger(
+      const removeToast = toaster.warning(
         <>
           Crossposting failed for {failedRelays.join(', ')} <br />
           <Button
@@ -138,14 +139,15 @@ export default function useCrossposter () {
           </Button>
         </>,
         {
-          onCancel: () => handleSkip()
+          onClose: () => handleSkip(),
+          autohide: false
         }
       )
     })
   }
 
   const crosspostError = (errorMessage) => {
-    return toaster.danger(`Error crossposting: ${errorMessage}`)
+    return toaster.warning(`crossposting failed: ${errorMessage}`)
   }
 
   async function handleEventCreation (item) {

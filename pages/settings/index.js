@@ -77,6 +77,11 @@ export function SettingsHeader () {
             <Nav.Link eventKey='mutes'>muted stackers</Nav.Link>
           </Link>
         </Nav.Item>
+        <Nav.Item>
+          <Link href='/settings/passphrase' passHref legacyBehavior>
+            <Nav.Link eventKey='passphrase'>device sync</Nav.Link>
+          </Link>
+        </Nav.Item>
       </Nav>
     </>
   )
@@ -84,7 +89,7 @@ export function SettingsHeader () {
 
 export default function Settings ({ ssrData }) {
   const toaster = useToast()
-  const me = useMe()
+  const { me } = useMe()
   const [setSettings] = useMutation(SET_SETTINGS, {
     update (cache, { data: { setSettings } }) {
       cache.modify({
@@ -96,23 +101,29 @@ export default function Settings ({ ssrData }) {
         }
       })
     }
-  }
-  )
+  })
   const logger = useServiceWorkerLogger()
 
   const { data } = useQuery(SETTINGS)
   const { settings: { privates: settings } } = useMemo(() => data ?? ssrData, [data, ssrData])
-  if (!data && !ssrData) return <PageLoading />
+
+  // if we switched to anon, me is null before the page is reloaded
+  if ((!data && !ssrData) || !me) return <PageLoading />
 
   return (
     <Layout>
       <div className='pb-3 w-100 mt-2' style={{ maxWidth: '600px' }}>
-        {hasOnlyOneAuthMethod(settings?.authMethods) && <AuthBanner />}
         <SettingsHeader />
+        {hasOnlyOneAuthMethod(settings?.authMethods) && <AuthBanner />}
         <Form
+          enableReinitialize
           initial={{
             tipDefault: settings?.tipDefault || 21,
+            tipRandom: settings?.tipRandom,
+            tipRandomMin: settings?.tipRandomMin || 1,
+            tipRandomMax: settings?.tipRandomMax || 10,
             turboTipping: settings?.turboTipping,
+            disableFreebies: settings?.disableFreebies || undefined,
             zapUndos: settings?.zapUndos || (settings?.tipDefault ? 100 * settings.tipDefault : 2100),
             zapUndosEnabled: settings?.zapUndos !== null,
             fiatCurrency: settings?.fiatCurrency || 'USD',
@@ -136,8 +147,9 @@ export default function Settings ({ ssrData }) {
             hideNostr: settings?.hideNostr,
             hideTwitter: settings?.hideTwitter,
             imgproxyOnly: settings?.imgproxyOnly,
+            showImagesAndVideos: settings?.showImagesAndVideos,
             wildWestMode: settings?.wildWestMode,
-            greeterMode: settings?.greeterMode,
+            satsFilter: settings?.satsFilter,
             nsfwMode: settings?.nsfwMode,
             nostrPubkey: settings?.nostrPubkey ? bech32encode(settings.nostrPubkey) : '',
             nostrCrossposting: settings?.nostrCrossposting,
@@ -149,7 +161,11 @@ export default function Settings ({ ssrData }) {
             noReferralLinks: settings?.noReferralLinks
           }}
           schema={settingsSchema}
-          onSubmit={async ({ tipDefault, withdrawMaxFeeDefault, zapUndos, zapUndosEnabled, nostrPubkey, nostrRelays, ...values }) => {
+          onSubmit={async ({
+            tipDefault, tipRandom, tipRandomMin, tipRandomMax, withdrawMaxFeeDefault,
+            zapUndos, zapUndosEnabled, nostrPubkey, nostrRelays, satsFilter,
+            ...values
+          }) => {
             if (nostrPubkey.length === 0) {
               nostrPubkey = null
             } else {
@@ -159,14 +175,19 @@ export default function Settings ({ ssrData }) {
               }
             }
 
-            const nostrRelaysFiltered = nostrRelays?.filter(word => word.trim().length > 0)
+            const nostrRelaysFiltered = nostrRelays
+              ?.filter(word => word.trim().length > 0)
+              .map(relay => relay.startsWith('wss://') ? relay : `wss://${relay}`)
 
             try {
               await setSettings({
                 variables: {
                   settings: {
                     tipDefault: Number(tipDefault),
+                    tipRandomMin: tipRandom ? Number(tipRandomMin) : null,
+                    tipRandomMax: tipRandom ? Number(tipRandomMax) : null,
                     withdrawMaxFeeDefault: Number(withdrawMaxFeeDefault),
+                    satsFilter: Number(satsFilter),
                     zapUndos: zapUndosEnabled ? Number(zapUndos) : null,
                     nostrPubkey,
                     nostrRelays: nostrRelaysFiltered,
@@ -190,7 +211,7 @@ export default function Settings ({ ssrData }) {
             append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
             hint={<small className='text-muted'>note: you can also press and hold the lightning bolt to zap custom amounts</small>}
           />
-          <div className='mb-2'>
+          <div className='pb-4'>
             <AccordianItem
               show={settings?.turboTipping}
               header={<div style={{ fontWeight: 'bold', fontSize: '92%' }}>advanced</div>}
@@ -201,7 +222,7 @@ export default function Settings ({ ssrData }) {
                     label={
                       <div className='d-flex align-items-center'>turbo zapping
                         <Info>
-                          <ul className='fw-bold'>
+                          <ul>
                             <li>Makes every additional bolt click raise your total zap to another 10x multiple of your default zap</li>
                             <li>e.g. if your zap default is 10 sats
                               <ul>
@@ -224,6 +245,7 @@ export default function Settings ({ ssrData }) {
                     groupClassName='mb-0'
                   />
                   <ZapUndosField />
+                  <TipRandomField />
                 </>
               }
             />
@@ -240,6 +262,20 @@ export default function Settings ({ ssrData }) {
             name='withdrawMaxFeeDefault'
             required
             append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
+          />
+          <Checkbox
+            label={
+              <div className='d-flex align-items-center'>disable freebies
+                <Info>
+                  <p>Some comments can be created without paying. However, those comments have limited visibility.</p>
+
+                  <p>If you disable freebies, you will always pay for your comments and get standard visibility.</p>
+
+                  <p>If you attach a sending wallet, we disable freebies for you unless you have checked/unchecked this value already.</p>
+                </Info>
+              </div>
+            }
+            name='disableFreebies'
           />
           <div className='form-label'>notify me when ...</div>
           <Checkbox
@@ -293,7 +329,7 @@ export default function Settings ({ ssrData }) {
             groupClassName='mb-0'
           />
           <Checkbox
-            label='I find or lose a cowboy hat'
+            label='I find or lose cowboy essentials (e.g. cowboy hat)'
             name='noteCowboyHat'
           />
           <div className='form-label'>privacy</div>
@@ -301,7 +337,7 @@ export default function Settings ({ ssrData }) {
             label={
               <div className='d-flex align-items-center'>hide invoice descriptions
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>Use this if you don't want funding sources to be linkable to your SN identity.</li>
                     <li>It makes your invoice descriptions blank.</li>
                     <li>This only applies to invoices you create
@@ -321,11 +357,11 @@ export default function Settings ({ ssrData }) {
             label={
               <div className='d-flex align-items-center'>autodelete withdrawal invoices
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>use this to protect receiver privacy</li>
                     <li>applies retroactively, cannot be reversed</li>
                     <li>withdrawal invoices are kept at least {INVOICE_RETENTION_DAYS} days for security and debugging purposes</li>
-                    <li>autodeletions are run a daily basis at night</li>
+                    <li>autodeletions are run on a daily basis at night</li>
                   </ul>
                 </Info>
               </div>
@@ -339,7 +375,7 @@ export default function Settings ({ ssrData }) {
             groupClassName='mb-0'
           />
           <Checkbox
-            label={<>hide my cowboy hat</>}
+            label={<>hide my cowboy essentials (e.g. cowboy hat)</>}
             name='hideCowboyHat'
             groupClassName='mb-0'
           />
@@ -354,14 +390,14 @@ export default function Settings ({ ssrData }) {
             groupClassName='mb-0'
           />
           <Checkbox
-            disabled={me.optional.githubId === null}
+            disabled={!settings?.authMethods?.github}
             label={
               <div className='d-flex align-items-center'>hide my linked github profile
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>Linked accounts are hidden from your profile by default</li>
                     <li>uncheck this to display your github on your profile</li>
-                    {me.optional.githubId === null &&
+                    {!settings?.authMethods?.github &&
                       <div className='my-2'>
                         <li><i>You don't seem to have a linked github account</i></li>
                         <ul><li>If this is wrong, try unlinking/relinking</li></ul>
@@ -374,14 +410,14 @@ export default function Settings ({ ssrData }) {
             groupClassName='mb-0'
           />
           <Checkbox
-            disabled={me.optional.nostrAuthPubkey === null}
+            disabled={!settings?.authMethods?.nostr}
             label={
               <div className='d-flex align-items-center'>hide my linked nostr profile
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>Linked accounts are hidden from your profile by default</li>
                     <li>Uncheck this to display your npub on your profile</li>
-                    {me.optional.nostrAuthPubkey === null &&
+                    {!settings?.authMethods?.nostr &&
                       <div className='my-2'>
                         <li>You don't seem to have a linked nostr account</li>
                         <ul><li>If this is wrong, try unlinking/relinking</li></ul>
@@ -394,14 +430,14 @@ export default function Settings ({ ssrData }) {
             groupClassName='mb-0'
           />
           <Checkbox
-            disabled={me.optional.twitterId === null}
+            disabled={!settings?.authMethods?.twitter}
             label={
               <div className='d-flex align-items-center'>hide my linked twitter profile
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>Linked accounts are hidden from your profile by default</li>
                     <li>Uncheck this to display your twitter on your profile</li>
-                    {me.optional.twitterId === null &&
+                    {!settings?.authMethods?.twitter &&
                       <div className='my-2'>
                         <i>You don't seem to have a linked twitter account</i>
                         <ul><li>If this is wrong, try unlinking/relinking</li></ul>
@@ -421,12 +457,12 @@ export default function Settings ({ ssrData }) {
             />}
           <Checkbox
             label={
-              <div className='d-flex align-items-center'>only load images from proxy
+              <div className='d-flex align-items-center'>do not load images, videos, or content from external sites
                 <Info>
-                  <ul className='fw-bold'>
-                    <li>only load images from our image proxy automatically</li>
+                  <ul>
+                    <li>only load images and videos when we can proxy them</li>
                     <li>this prevents IP address leaks to arbitrary sites</li>
-                    <li>if we fail to load an image, the raw link will be shown</li>
+                    <li>if we can't, the raw link will be shown instead</li>
                   </ul>
                 </Info>
               </div>
@@ -438,7 +474,7 @@ export default function Settings ({ ssrData }) {
             label={
               <div className='d-flex align-items-center'>allow anonymous diagnostics
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>collect and send back anonymous diagnostics data</li>
                     <li>this information is used to fix bugs</li>
                     <li>this information includes:
@@ -461,12 +497,56 @@ export default function Settings ({ ssrData }) {
             label={<>don't create referral links on copy</>}
             name='noReferralLinks'
           />
-          <div className='form-label'>content</div>
+          <h4>content</h4>
+          <Input
+            label={
+              <div className='d-flex align-items-center'>filter by sats
+                <Info>
+                  <ul>
+                    <li>hide the post if the sum of these is less than your setting:</li>
+                    <ul>
+                      <li>posting cost</li>
+                      <li>total sats from zaps</li>
+                      <li>boost</li>
+                    </ul>
+                    <li>set to zero to be a greeter, with the tradeoff of seeing more spam</li>
+                  </ul>
+                </Info>
+              </div>
+            }
+            name='satsFilter'
+            required
+            append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
+          />
+          <Checkbox
+            label={
+              <div className='d-flex align-items-center'>show images, video, and 3rd party embeds
+                <Info>
+                  <ul>
+                    <li>if checked and a link is an image, video or can be embedded in another way, we will do it</li>
+                    <li>we support embeds from following sites:</li>
+                    <ul>
+                      <li>njump.me</li>
+                      <li>youtube.com</li>
+                      <li>twitter.com</li>
+                      <li>spotify.com</li>
+                      <li>rumble.com</li>
+                      <li>wavlake.com</li>
+                      <li>bitcointv.com</li>
+                      <li>peertube.tv</li>
+                    </ul>
+                  </ul>
+                </Info>
+              </div>
+            }
+            name='showImagesAndVideos'
+            groupClassName='mb-0'
+          />
           <Checkbox
             label={
               <div className='d-flex align-items-center'>wild west mode
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>don't hide flagged content</li>
                     <li>don't down rank flagged content</li>
                   </ul>
@@ -478,24 +558,9 @@ export default function Settings ({ ssrData }) {
           />
           <Checkbox
             label={
-              <div className='d-flex align-items-center'>greeter mode
-                <Info>
-                  <ul className='fw-bold'>
-                    <li>see and screen free posts and comments</li>
-                    <li>help onboard new stackers to SN and Lightning</li>
-                    <li>you might be subject to more spam</li>
-                  </ul>
-                </Info>
-              </div>
-            }
-            name='greeterMode'
-            groupClassName='mb-0'
-          />
-          <Checkbox
-            label={
               <div className='d-flex align-items-center'>nsfw mode
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>see posts from nsfw territories</li>
                   </ul>
                 </Info>
@@ -508,7 +573,7 @@ export default function Settings ({ ssrData }) {
             label={
               <div className='d-flex align-items-center'>crosspost to nostr
                 <Info>
-                  <ul className='fw-bold'>
+                  <ul>
                     <li>crosspost your items to nostr</li>
                     <li>requires NIP-07 extension for signing</li>
                     <li>we use your NIP-05 relays if set</li>
@@ -814,7 +879,7 @@ export function EmailLinkForm ({ callbackUrl }) {
 
 function ApiKey ({ enabled, apiKey }) {
   const showModal = useShowModal()
-  const me = useMe()
+  const { me } = useMe()
   const [generateApiKey] = useMutation(
     gql`
       mutation generateApiKey($id: ID!) {
@@ -898,7 +963,7 @@ I estimate that I will call the GraphQL API this many times (rough estimate is f
           </div>
         </OverlayTrigger>
         <Info>
-          <ul className='fw-bold'>
+          <ul>
             <li>use API keys with our <Link target='_blank' href='/api/graphql'>GraphQL API</Link> for authentication</li>
             <li>you need to add the API key to the <span className='text-monospace'>X-API-Key</span> header of your requests</li>
             <li>you can currently only generate API keys if we enabled it for your account</li>
@@ -940,7 +1005,7 @@ function ApiKeyModal ({ apiKey }) {
 }
 
 function ApiKeyDeleteObstacle ({ onClose }) {
-  const me = useMe()
+  const { me } = useMe()
   const [deleteApiKey] = useMutation(
     gql`
       mutation deleteApiKey($id: ID!) {
@@ -995,31 +1060,80 @@ function ApiKeyDeleteObstacle ({ onClose }) {
 const ZapUndosField = () => {
   const [checkboxField] = useField({ name: 'zapUndosEnabled' })
   return (
-    <div className='d-flex flex-row align-items-center'>
-      <Input
-        name='zapUndos'
-        disabled={!checkboxField.value}
+    <>
+      <Checkbox
+        name='zapUndosEnabled'
+        groupClassName='mb-0'
         label={
-          <Checkbox
-            name='zapUndosEnabled'
-            groupClassName='mb-0'
-            label={
-              <div className='d-flex align-items-center'>
-                zap undos
-                <Info>
-                  <ul className='fw-bold'>
-                    <li>After every zap that exceeds or is equal to the threshold, the bolt will pulse</li>
-                    <li>You can undo the zap if you click the bolt while it's pulsing</li>
-                    <li>The bolt will pulse for {ZAP_UNDO_DELAY_MS / 1000} seconds</li>
-                  </ul>
-                </Info>
-              </div>
-              }
-          />
-        }
-        append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
-        hint={<small className='text-muted'>threshold at which undo button is shown</small>}
+          <div className='d-flex align-items-center'>
+            zap undos
+            <Info>
+              <ul>
+                <li>After every zap that exceeds or is equal to the threshold, the bolt will pulse</li>
+                <li>You can undo the zap if you click the bolt while it's pulsing</li>
+                <li>The bolt will pulse for {ZAP_UNDO_DELAY_MS / 1000} seconds</li>
+              </ul>
+            </Info>
+          </div>
+          }
       />
-    </div>
+      {checkboxField.value &&
+        <Input
+          name='zapUndos'
+          append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
+          hint={<small className='text-muted'>threshold at which undos will be possible</small>}
+          groupClassName='mt-1'
+        />}
+    </>
+  )
+}
+
+const TipRandomField = () => {
+  const [tipRandomField] = useField({ name: 'tipRandom' })
+  const [tipRandomMinField] = useField({ name: 'tipRandomMin' })
+  const [tipRandomMaxField] = useField({ name: 'tipRandomMax' })
+  return (
+    <>
+      <Checkbox
+        name='tipRandom'
+        groupClassName='mb-0'
+        label={
+          <div className='d-flex align-items-center'>
+            random zaps
+            <Info>
+              <ul>
+                <li>Set a minimum and maximum zap amount</li>
+                <li>Each time you zap something, a random amount of sats between your minimum and maximum will be zapped</li>
+                <li>If this setting is enabled, it will ignore your default zap amount</li>
+              </ul>
+            </Info>
+          </div>
+        }
+      />
+      {tipRandomField.value &&
+        <>
+          <Input
+            type='number'
+            label='minimum random zap'
+            name='tipRandomMin'
+            disabled={!tipRandomField.value}
+            groupClassName='mb-1'
+            required
+            autoFocus
+            max={tipRandomMaxField.value ? tipRandomMaxField.value - 1 : undefined}
+            append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
+          />
+          <Input
+            type='number'
+            label='maximum random zap'
+            name='tipRandomMax'
+            disabled={!tipRandomField.value}
+            required
+            autoFocus
+            min={tipRandomMinField.value ? tipRandomMinField.value + 1 : undefined}
+            append={<InputGroup.Text className='text-monospace'>sats</InputGroup.Text>}
+          />
+        </>}
+    </>
   )
 }
